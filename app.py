@@ -354,54 +354,83 @@ def _render_results(user_name: str, cfg: dict, result: dict) -> None:
         render_stats(stats)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── dataset status / label confirmation ──────────────────────────────────
+    # ── label + save (nothing is saved until the user confirms) ─────────────
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    st.markdown("<div class='section-label'>Dataset</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-label'>Save to dataset</div>", unsafe_allow_html=True)
 
-    save_col, label_col = st.columns([1, 1], gap="medium")
+    already_saved = result.get("saved", False)
+    saved_as      = result.get("saved_as")
+    saved_fname   = result.get("saved_fname")
 
-    saved_as    = result.get("saved_as", 0)
-    saved_fname = result.get("saved_fname")
+    if already_saved:
+        save_col, label_col = st.columns([1, 1], gap="medium")
 
-    with save_col:
-        st.markdown(
-            f"<div class='saved-badge'>✓ Saved as digit {saved_as}</div>",
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            "Saved as a flattened CSV row AND as a real 28×28 grid file "
-            "you can open and see the digit's shape in."
-        )
-        if saved_fname:
-            grid_bytes = get_grid_csv_bytes(saved_fname)
-            if grid_bytes:
-                grid_csv_name = f"digit_{saved_as}_{saved_fname}.csv"
-                st.download_button(
-                    "⬇ Download 28×28 grid CSV",
-                    grid_bytes, grid_csv_name, "text/csv",
-                    use_container_width=True,
-                )
+        with save_col:
+            st.markdown(
+                f"<div class='saved-badge'>✓ Saved as digit {saved_as}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Saved as a flattened CSV row AND as a real 28×28 grid file "
+                "you can open and see the digit's shape in."
+            )
+            if saved_fname:
+                grid_bytes = get_grid_csv_bytes(saved_fname)
+                if grid_bytes:
+                    grid_csv_name = f"digit_{saved_as}_{saved_fname}.csv"
+                    st.download_button(
+                        "⬇ Download 28×28 grid CSV",
+                        grid_bytes, grid_csv_name, "text/csv",
+                        use_container_width=True,
+                    )
 
-    with label_col:
-        confirmed_digit = st.selectbox(
-            "Not correct? Fix the label",
-            options=list(range(10)),
-            index=int(saved_as),
-            key="confirm_digit",
-        )
-        if confirmed_digit != saved_as:
-            if st.button("↻ Re-save with corrected label",
-                         type="primary", use_container_width=True):
+        with label_col:
+            corrected_digit = st.selectbox(
+                "Wrong? Pick the correct digit",
+                options=list(range(10)),
+                index=int(saved_as),
+                key="confirm_digit",
+            )
+            if corrected_digit != saved_as:
+                if st.button("↻ Re-save with corrected label",
+                             type="primary", use_container_width=True):
+                    fname = save_sample(
+                        image=mnist_img,
+                        digit=int(corrected_digit),
+                        user_name=user_name,
+                        confidence=0.0,
+                    )
+                    result["saved_as"]    = corrected_digit
+                    result["saved_fname"] = fname
+                    st.session_state["last_result"] = result
+                    st.success(f"Re-saved as digit {corrected_digit}")
+                    st.rerun()
+    else:
+        st.info("Which digit did you draw? Pick it below, then save.")
+        pick_col, btn_col = st.columns([1, 1], gap="medium")
+
+        with pick_col:
+            picked_digit = st.selectbox(
+                "Digit you drew",
+                options=list(range(10)),
+                index=0,
+                key="confirm_digit",
+            )
+
+        with btn_col:
+            st.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+            if st.button("✓ Confirm & Save", type="primary", use_container_width=True):
                 fname = save_sample(
                     image=mnist_img,
-                    digit=int(confirmed_digit),
+                    digit=int(picked_digit),
                     user_name=user_name,
                     confidence=0.0,
                 )
-                result["saved_as"]    = confirmed_digit
+                result["saved"]       = True
+                result["saved_as"]    = picked_digit
                 result["saved_fname"] = fname
                 st.session_state["last_result"] = result
-                st.success(f"Re-saved as digit {confirmed_digit}")
+                st.success(f"Saved as digit {picked_digit}")
                 st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -593,20 +622,16 @@ def main() -> None:
                     if mnist_img is None:
                         st.warning("No digit detected. Try a thicker or larger stroke.")
                     else:
-                        # ── default label: 0, user confirms/corrects below ──
-                        auto_label = 0
-                        auto_fname = save_sample(
-                            image=mnist_img,
-                            digit=auto_label,
-                            user_name=user_name,
-                            confidence=0.0,
-                        )
-
+                        # NOTE: nothing is saved yet — the user must pick
+                        # the correct digit and click "Confirm & Save"
+                        # below. This prevents every drawing silently
+                        # being mislabelled as 0.
                         st.session_state["last_result"] = {
                             "proc":        proc,
                             "mnist_img":   mnist_img,
-                            "saved_as":    auto_label,
-                            "saved_fname": auto_fname,
+                            "saved":       False,
+                            "saved_as":    None,
+                            "saved_fname": None,
                         }
 
             if "last_result" not in st.session_state:
