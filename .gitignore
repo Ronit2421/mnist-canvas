@@ -1,0 +1,17 @@
+# Secrets — NEVER commit real credentials
+.streamlit/secrets.toml
+
+# Local fallback dataset (not used once Supabase is configured)
+dataset/
+
+# Trained classifier model (regenerates automatically on first run)
+*.joblib
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS / editor junk
+.DS_Store
+.vscode/
+.idea/
