@@ -3,10 +3,13 @@ app.py  ·  MNIST Canvas
 ────────────────────────
 Flow:
   1. Welcome screen  → user enters their name
-  2. Canvas          → draw a digit
-  3. Process         → MNIST preprocessing pipeline
-  4. Confirm & Save  → user confirms the digit label, auto-saved to dataset
-  5. Dataset tab     → browse, download CSV / NPY
+  2. Pick digit       → user selects which digit (0-9) they're about to draw
+  3. Canvas           → draw that digit
+  4. Process & Save   → MNIST preprocessing + automatic save with the
+                         digit picked in step 2 (no extra confirm click,
+                         and never mislabelled since the label was fixed
+                         before drawing even started)
+  5. Dataset tab      → browse, download CSV / NPY
 
 Launch:
     streamlit run app.py
@@ -215,6 +218,26 @@ def _css() -> None:
           border-radius: 12px;
           box-shadow: 0 0 0 1px {_BORDER};
       }}
+
+      /* ── digit picker ── */
+      .digit-picker-label {{
+          font-size: 0.95rem; font-weight: 700; color: {_TEXT};
+          margin-bottom: 0.6rem;
+      }}
+      div[data-testid="stRadio"] > div {{
+          gap: 6px;
+      }}
+      div[data-testid="stRadio"] label {{
+          background: {_SURFACE};
+          border: 1.5px solid {_BORDER};
+          border-radius: 10px;
+          padding: 0.5rem 0.85rem;
+          font-weight: 700;
+          transition: all .15s ease;
+      }}
+      div[data-testid="stRadio"] label:hover {{
+          border-color: {_ACCENT};
+      }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -354,83 +377,54 @@ def _render_results(user_name: str, cfg: dict, result: dict) -> None:
         render_stats(stats)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── label + save (nothing is saved until the user confirms) ─────────────
+    # ── saved badge + optional label correction ──────────────────────────────
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    st.markdown("<div class='section-label'>Save to dataset</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-label'>Dataset</div>", unsafe_allow_html=True)
 
-    already_saved = result.get("saved", False)
-    saved_as      = result.get("saved_as")
-    saved_fname   = result.get("saved_fname")
+    saved_as    = result.get("saved_as", 0)
+    saved_fname = result.get("saved_fname")
 
-    if already_saved:
-        save_col, label_col = st.columns([1, 1], gap="medium")
+    save_col, label_col = st.columns([1, 1], gap="medium")
 
-        with save_col:
-            st.markdown(
-                f"<div class='saved-badge'>✓ Saved as digit {saved_as}</div>",
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Saved as a flattened CSV row AND as a real 28×28 grid file "
-                "you can open and see the digit's shape in."
-            )
-            if saved_fname:
-                grid_bytes = get_grid_csv_bytes(saved_fname)
-                if grid_bytes:
-                    grid_csv_name = f"digit_{saved_as}_{saved_fname}.csv"
-                    st.download_button(
-                        "⬇ Download 28×28 grid CSV",
-                        grid_bytes, grid_csv_name, "text/csv",
-                        use_container_width=True,
-                    )
+    with save_col:
+        st.markdown(
+            f"<div class='saved-badge'>✓ Saved as digit {saved_as}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Saved as a flattened CSV row AND as a real 28×28 grid file "
+            "you can open and see the digit's shape in."
+        )
+        if saved_fname:
+            grid_bytes = get_grid_csv_bytes(saved_fname)
+            if grid_bytes:
+                grid_csv_name = f"digit_{saved_as}_{saved_fname}.csv"
+                st.download_button(
+                    "⬇ Download 28×28 grid CSV",
+                    grid_bytes, grid_csv_name, "text/csv",
+                    use_container_width=True,
+                )
 
-        with label_col:
-            corrected_digit = st.selectbox(
-                "Wrong? Pick the correct digit",
-                options=list(range(10)),
-                index=int(saved_as),
-                key="confirm_digit",
-            )
-            if corrected_digit != saved_as:
-                if st.button("↻ Re-save with corrected label",
-                             type="primary", use_container_width=True):
-                    fname = save_sample(
-                        image=mnist_img,
-                        digit=int(corrected_digit),
-                        user_name=user_name,
-                        confidence=0.0,
-                    )
-                    result["saved_as"]    = corrected_digit
-                    result["saved_fname"] = fname
-                    st.session_state["last_result"] = result
-                    st.success(f"Re-saved as digit {corrected_digit}")
-                    st.rerun()
-    else:
-        st.info("Which digit did you draw? Pick it below, then save.")
-        pick_col, btn_col = st.columns([1, 1], gap="medium")
-
-        with pick_col:
-            picked_digit = st.selectbox(
-                "Digit you drew",
-                options=list(range(10)),
-                index=0,
-                key="confirm_digit",
-            )
-
-        with btn_col:
-            st.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
-            if st.button("✓ Confirm & Save", type="primary", use_container_width=True):
+    with label_col:
+        corrected_digit = st.selectbox(
+            "Misclicked? Fix the label",
+            options=list(range(10)),
+            index=int(saved_as),
+            key="confirm_digit",
+        )
+        if corrected_digit != saved_as:
+            if st.button("↻ Re-save with corrected label",
+                         type="primary", use_container_width=True):
                 fname = save_sample(
                     image=mnist_img,
-                    digit=int(picked_digit),
+                    digit=int(corrected_digit),
                     user_name=user_name,
                     confidence=0.0,
                 )
-                result["saved"]       = True
-                result["saved_as"]    = picked_digit
+                result["saved_as"]    = corrected_digit
                 result["saved_fname"] = fname
                 st.session_state["last_result"] = result
-                st.success(f"Saved as digit {picked_digit}")
+                st.success(f"Re-saved as digit {corrected_digit}")
                 st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -567,7 +561,7 @@ def main() -> None:
         f"<h1 style='font-size:1.6rem;margin-bottom:0'>✏️ MNIST Canvas</h1>"
         f"<p style='color:{_MUTED};font-size:0.88rem;margin-top:0.2rem'>"
         f"Hello <b style='color:{_ACCENT}'>{user_name}</b> · "
-        f"draw a digit and click Process — it's saved to the dataset automatically</p>",
+        f"pick the digit you're about to draw, draw it, then process — saved automatically</p>",
         unsafe_allow_html=True,
     )
 
@@ -578,7 +572,21 @@ def main() -> None:
 
         with left:
             st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-            st.markdown("<div class='section-label'>Draw here</div>",
+
+            # ── 1. Pick the digit BEFORE drawing ─────────────────────────────
+            st.markdown("<div class='digit-picker-label'>① Which digit are you about to draw?</div>",
+                        unsafe_allow_html=True)
+            picked_digit = st.radio(
+                "Digit",
+                options=list(range(10)),
+                index=st.session_state.get("picked_digit", 0),
+                horizontal=True,
+                label_visibility="collapsed",
+                key="digit_radio",
+            )
+            st.session_state["picked_digit"] = picked_digit
+
+            st.markdown("<div class='digit-picker-label' style='margin-top:1rem'>② Draw it here</div>",
                         unsafe_allow_html=True)
             try:
                 from streamlit_drawable_canvas import st_canvas
@@ -599,7 +607,7 @@ def main() -> None:
             )
 
             c1, c2 = st.columns(2)
-            process_btn = c1.button("▶ Process", type="primary",
+            process_btn = c1.button(f"✓ Save as \"{picked_digit}\"", type="primary",
                                     use_container_width=True)
             clear_btn   = c2.button("🗑 Clear",  use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
@@ -622,20 +630,25 @@ def main() -> None:
                     if mnist_img is None:
                         st.warning("No digit detected. Try a thicker or larger stroke.")
                     else:
-                        # NOTE: nothing is saved yet — the user must pick
-                        # the correct digit and click "Confirm & Save"
-                        # below. This prevents every drawing silently
-                        # being mislabelled as 0.
+                        # ── automatic save — label was already chosen in
+                        # step ① before drawing started, so there's no
+                        # ambiguity and no extra confirmation step needed.
+                        fname = save_sample(
+                            image=mnist_img,
+                            digit=int(picked_digit),
+                            user_name=user_name,
+                            confidence=0.0,
+                        )
                         st.session_state["last_result"] = {
                             "proc":        proc,
                             "mnist_img":   mnist_img,
-                            "saved":       False,
-                            "saved_as":    None,
-                            "saved_fname": None,
+                            "saved":       True,
+                            "saved_as":    picked_digit,
+                            "saved_fname": fname,
                         }
 
             if "last_result" not in st.session_state:
-                st.info("Draw a digit on the canvas, then click **▶ Process**.")
+                st.info("Pick a digit, draw it, then click **Save**.")
             else:
                 _render_results(user_name, cfg, st.session_state["last_result"])
 
