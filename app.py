@@ -2,14 +2,17 @@
 app.py  ·  MNIST Canvas
 ────────────────────────
 Flow:
-  1. Welcome screen  → user enters their name
-  2. Pick digit       → user selects which digit (0-9) they're about to draw
-  3. Canvas           → draw that digit
-  4. Process & Save   → MNIST preprocessing + automatic save with the
-                         digit picked in step 2 (no extra confirm click,
-                         and never mislabelled since the label was fixed
-                         before drawing even started)
-  5. Dataset tab      → browse, download CSV / NPY
+  1. Welcome screen   → user enters their name
+  2. Guided session   → user draws digits 0,1,2,...,9 IN ORDER, one at a
+                         time. Each digit is auto-saved the moment it's
+                         processed (label is never ambiguous — it's
+                         always whatever digit the session is currently
+                         on), then the session auto-advances to the next
+                         digit.
+  3. Session complete → shown after digit 9 is saved; option to start
+                         a brand new 0-9 session.
+  4. Dataset tab       → browse, download CSV / NPY (reads from the
+                         shared Google Sheet).
 
 Launch:
     streamlit run app.py
@@ -39,13 +42,14 @@ from ui_components import (
     render_download_buttons,
     render_pipeline_steps,
 )
-from dataset_manager import (
+from sheets_manager import (
     save_sample,
     dataset_summary,
     total_samples,
     get_npy_bytes,
     get_csv_bytes,
     get_grid_csv_bytes,
+    image_to_grid_csv_bytes,
     load_csv_as_records,
 )
 
@@ -61,6 +65,8 @@ _TEXT     = "#111827"
 _MUTED    = "#6B7280"
 _BORDER   = "#E5E7EB"
 _GREEN    = "#10B981"
+
+TOTAL_DIGITS = 10  # session covers 0..9
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,7 +84,6 @@ def _css() -> None:
           font-family: 'Inter', sans-serif;
       }}
       [data-testid="stHeader"] {{ background: transparent; }}
-
       * {{ font-family: 'Inter', sans-serif; }}
 
       [data-testid="stSidebar"] {{
@@ -94,7 +99,6 @@ def _css() -> None:
           color: {_TEXT};
       }}
 
-      /* ── card wrapper used around major sections ── */
       .ui-card {{
           background: {_CARD};
           border: 1px solid {_BORDER};
@@ -104,7 +108,6 @@ def _css() -> None:
           margin-bottom: 1rem;
       }}
 
-      /* ── metric cards ── */
       [data-testid="stMetric"] {{
           background: {_SURFACE};
           border: 1px solid {_BORDER};
@@ -112,53 +115,34 @@ def _css() -> None:
           padding: 14px 16px;
       }}
       [data-testid="stMetricValue"] {{
-          color: {_TEXT};
-          font-weight: 700;
-          font-size: 1.15rem;
+          color: {_TEXT}; font-weight: 700; font-size: 1.15rem;
       }}
       [data-testid="stMetricLabel"] {{ color: {_MUTED}; font-size: 0.78rem; }}
 
       .section-label {{
-          font-size: 0.72rem;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
-          color: {_MUTED};
-          font-weight: 600;
-          margin-bottom: 0.5rem;
+          font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
+          color: {_MUTED}; font-weight: 600; margin-bottom: 0.5rem;
       }}
 
-      /* ── welcome card ── */
       .welcome-wrap {{
           display: flex; align-items: center; justify-content: center;
           min-height: 70vh;
       }}
       .welcome-card {{
-          background: {_CARD};
-          border: 1px solid {_BORDER};
-          border-radius: 24px;
-          padding: 3rem 2.5rem;
-          max-width: 440px;
-          width: 100%;
+          background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 24px;
+          padding: 3rem 2.5rem; max-width: 440px; width: 100%;
           box-shadow: 0 20px 50px -12px rgba(99,102,241,0.18), 0 4px 12px rgba(17,24,39,0.04);
           text-align: center;
       }}
       .welcome-icon {{
           width: 56px; height: 56px; margin: 0 auto 1.2rem;
           background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2});
-          border-radius: 16px;
-          display: flex; align-items: center; justify-content: center;
-          font-size: 1.6rem;
+          border-radius: 16px; display: flex; align-items: center;
+          justify-content: center; font-size: 1.6rem;
       }}
-      .welcome-title {{
-          font-size: 1.7rem; font-weight: 800; color: {_TEXT};
-          margin-bottom: 0.3em;
-      }}
-      .welcome-sub {{
-          font-size: 0.9rem; color: {_MUTED};
-          margin-bottom: 1.8rem; line-height: 1.5;
-      }}
+      .welcome-title {{ font-size: 1.7rem; font-weight: 800; color: {_TEXT}; margin-bottom: 0.3em; }}
+      .welcome-sub {{ font-size: 0.9rem; color: {_MUTED}; margin-bottom: 1.8rem; line-height: 1.5; }}
 
-      /* ── badges ── */
       .saved-badge {{
           background: {_GREEN}14; border: 1px solid {_GREEN}55;
           color: #047857; border-radius: 10px; padding: 0.55rem 1rem;
@@ -166,84 +150,80 @@ def _css() -> None:
           display: inline-flex; align-items: center; gap: 0.4rem;
       }}
 
-      /* ── dataset table ── */
       [data-testid="stDataFrame"] {{
-          background: {_CARD};
-          border: 1px solid {_BORDER};
-          border-radius: 12px;
+          background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 12px;
       }}
 
       hr {{ border-color: {_BORDER}; margin: 1.2rem 0; }}
 
-      /* ── buttons ── */
-      [data-testid="stDownloadButton"] button,
-      .stButton button {{
-          border-radius: 10px;
-          font-weight: 600;
-          font-size: 0.86rem;
-          border: 1px solid {_BORDER};
-          transition: all .15s ease;
+      [data-testid="stDownloadButton"] button, .stButton button {{
+          border-radius: 10px; font-weight: 600; font-size: 0.86rem;
+          border: 1px solid {_BORDER}; transition: all .15s ease;
       }}
-      [data-testid="stDownloadButton"] button {{
-          background: {_CARD}; color: {_TEXT};
-      }}
-      [data-testid="stDownloadButton"] button:hover {{
-          border-color: {_ACCENT}; color: {_ACCENT};
-      }}
+      [data-testid="stDownloadButton"] button {{ background: {_CARD}; color: {_TEXT}; }}
+      [data-testid="stDownloadButton"] button:hover {{ border-color: {_ACCENT}; color: {_ACCENT}; }}
       button[kind="primary"] {{
           background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2}) !important;
           border: none !important; color: white !important;
           box-shadow: 0 4px 14px rgba(99,102,241,0.3);
       }}
-      button[kind="primary"]:hover {{
-          opacity: 0.92;
-      }}
+      button[kind="primary"]:hover {{ opacity: 0.92; }}
 
-      /* ── tabs ── */
-      [data-baseweb="tab-list"] {{
-          gap: 4px;
-      }}
-      [data-baseweb="tab"] {{
-          border-radius: 10px 10px 0 0;
-          font-weight: 600;
-      }}
+      [data-baseweb="tab-list"] {{ gap: 4px; }}
+      [data-baseweb="tab"] {{ border-radius: 10px 10px 0 0; font-weight: 600; }}
 
-      /* ── slider / toggle accent ── */
-      [data-testid="stSlider"] [role="slider"] {{
-          background-color: {_ACCENT} !important;
-      }}
+      [data-testid="stSlider"] [role="slider"] {{ background-color: {_ACCENT} !important; }}
 
-      /* ── dark canvas, styled to sit inside a light card ── */
       .ui-card canvas {{
           border-radius: 12px;
           box-shadow: 0 0 0 1px {_BORDER};
       }}
 
-      /* ── digit picker ── */
-      .digit-picker-label {{
-          font-size: 0.95rem; font-weight: 700; color: {_TEXT};
-          margin-bottom: 0.6rem;
+      /* ── giant target-digit display ── */
+      .target-digit-wrap {{
+          display: flex; align-items: center; gap: 1rem;
+          margin-bottom: 1rem;
       }}
-      div[data-testid="stRadio"] > div {{
-          gap: 6px;
+      .target-digit-circle {{
+          width: 84px; height: 84px; border-radius: 20px;
+          background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2});
+          display: flex; align-items: center; justify-content: center;
+          font-size: 2.6rem; font-weight: 800; color: white; flex-shrink: 0;
+          box-shadow: 0 8px 20px rgba(99,102,241,0.35);
       }}
-      div[data-testid="stRadio"] label {{
-          background: {_SURFACE};
-          border: 1.5px solid {_BORDER};
-          border-radius: 10px;
-          padding: 0.5rem 0.85rem;
-          font-weight: 700;
-          transition: all .15s ease;
+      .target-digit-meta {{ font-size: 0.85rem; color: {_MUTED}; }}
+      .target-digit-meta b {{ color: {_TEXT}; }}
+
+      /* ── progress dots ── */
+      .progress-dots {{ display: flex; gap: 6px; margin-bottom: 1.2rem; flex-wrap: wrap; }}
+      .progress-dot {{
+          width: 30px; height: 30px; border-radius: 8px;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 0.78rem; font-weight: 700; font-family: monospace;
+          border: 1.5px solid {_BORDER}; color: {_MUTED}; background: {_SURFACE};
       }}
-      div[data-testid="stRadio"] label:hover {{
-          border-color: {_ACCENT};
+      .progress-dot.done {{
+          background: {_GREEN}1A; border-color: {_GREEN}77; color: #047857;
+      }}
+      .progress-dot.current {{
+          background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2});
+          border-color: transparent; color: white;
+          box-shadow: 0 4px 10px rgba(99,102,241,0.4);
+      }}
+
+      /* ── session-complete card ── */
+      .complete-icon {{
+          width: 64px; height: 64px; margin: 0 auto 1rem;
+          background: linear-gradient(135deg, {_GREEN}, #34D399);
+          border-radius: 18px; display: flex; align-items: center;
+          justify-content: center; font-size: 2rem;
       }}
     </style>
     """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sidebar (only shown on canvas / dataset screens)
+# Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _sidebar(user_name: str) -> dict:
@@ -263,8 +243,8 @@ def _sidebar(user_name: str) -> dict:
         </div>
         """, unsafe_allow_html=True)
 
-        if st.button("← Change name", use_container_width=True):
-            for k in ["user_name", "screen", "last_result"]:
+        if st.button("← Change name / restart session", use_container_width=True):
+            for k in ["user_name", "screen", "last_result", "session_index"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -313,8 +293,8 @@ def _screen_welcome() -> None:
         <div class="welcome-icon">✏️</div>
         <div class="welcome-title">MNIST Canvas</div>
         <div class="welcome-sub">
-          Draw digits, generate MNIST-compatible images,<br>
-          and contribute to a shared dataset.
+          You'll be asked to draw each digit from 0 to 9, one at a time.<br>
+          Every drawing is saved automatically to a shared dataset.
         </div>
       </div>
     </div>
@@ -326,7 +306,7 @@ def _screen_welcome() -> None:
             "Your name", placeholder="e.g. Ronit",
             label_visibility="collapsed", key="name_input",
         )
-        if st.button("Start drawing  →", type="primary", use_container_width=True):
+        if st.button("Start session  →", type="primary", use_container_width=True):
             name = name.strip()
             if not name:
                 st.error("Please enter your name to continue.")
@@ -335,6 +315,7 @@ def _screen_welcome() -> None:
             else:
                 st.session_state["user_name"] = name
                 st.session_state["screen"] = "canvas"
+                st.session_state["session_index"] = 0
                 st.rerun()
 
         st.markdown(
@@ -345,108 +326,123 @@ def _screen_welcome() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Canvas + Results rendering helper (called from main())
+# Progress dots + target digit header
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_progress(session_index: int) -> None:
+    dots_html = "<div class='progress-dots'>"
+    for d in range(TOTAL_DIGITS):
+        if d < session_index:
+            cls = "done"
+        elif d == session_index:
+            cls = "current"
+        else:
+            cls = ""
+        dots_html += f"<div class='progress-dot {cls}'>{d}</div>"
+    dots_html += "</div>"
+    st.markdown(dots_html, unsafe_allow_html=True)
+
+
+def _render_target_digit(session_index: int) -> None:
+    st.markdown(f"""
+    <div class="target-digit-wrap">
+      <div class="target-digit-circle">{session_index}</div>
+      <div class="target-digit-meta">
+        Draw this digit · <b>{session_index + 1} of {TOTAL_DIGITS}</b> in your session
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Screen 3 — Session complete
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _screen_session_complete(user_name: str) -> None:
+    st.markdown(f"""
+    <div class="welcome-wrap">
+      <div class="welcome-card">
+        <div class="complete-icon">🎉</div>
+        <div class="welcome-title">Session complete!</div>
+        <div class="welcome-sub">
+          Thanks <b style='color:{_ACCENT}'>{user_name}</b> — you drew all 10
+          digits (0–9) and every one was saved to the shared dataset.
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _, centre, _ = st.columns([1, 1.2, 1])
+    with centre:
+        if st.button("Start a new session  →", type="primary", use_container_width=True):
+            st.session_state["session_index"] = 0
+            st.session_state.pop("last_result", None)
+            st.rerun()
+        if st.button("View collected dataset", use_container_width=True):
+            st.session_state["screen"] = "dataset_only"
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Results renderer (shown after each digit is saved)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _render_results(user_name: str, cfg: dict, result: dict) -> None:
-    """Render the right-panel results from a stored result dict."""
     proc      = result["proc"]
     mnist_img = result["mnist_img"]
+    saved_as  = result["saved_as"]
 
     stats     = proc.get_stats()
     png_bytes = proc.to_png_bytes()
     npy_bytes = proc.to_numpy_bytes()
 
-    # ── 28×28 image + download ───────────────────────────────────────────────
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
     img_col, dl_col = st.columns([1, 1], gap="medium")
 
     with img_col:
-        st.markdown("<div class='section-label'>MNIST output</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='section-label'>MNIST output</div>", unsafe_allow_html=True)
         render_mnist_image(mnist_img)
 
     with dl_col:
-        st.markdown("<div class='section-label'>Download image</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='section-label'>Download image</div>", unsafe_allow_html=True)
         if png_bytes and npy_bytes:
             render_download_buttons(png_bytes, npy_bytes)
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("<div class='section-label'>Image stats</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='section-label'>Image stats</div>", unsafe_allow_html=True)
         render_stats(stats)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── saved badge + optional label correction ──────────────────────────────
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    st.markdown("<div class='section-label'>Dataset</div>", unsafe_allow_html=True)
-
-    saved_as    = result.get("saved_as", 0)
-    saved_fname = result.get("saved_fname")
-
-    save_col, label_col = st.columns([1, 1], gap="medium")
-
+    save_col, _spacer = st.columns([1, 1], gap="medium")
     with save_col:
         st.markdown(
             f"<div class='saved-badge'>✓ Saved as digit {saved_as}</div>",
             unsafe_allow_html=True,
         )
-        st.caption(
-            "Saved as a flattened CSV row AND as a real 28×28 grid file "
-            "you can open and see the digit's shape in."
+        st.caption("Saved to the shared Google Sheet dataset.")
+        grid_bytes = image_to_grid_csv_bytes(mnist_img)
+        st.download_button(
+            "⬇ Download 28×28 grid CSV",
+            grid_bytes, f"digit_{saved_as}.csv", "text/csv",
+            use_container_width=True,
         )
-        if saved_fname:
-            grid_bytes = get_grid_csv_bytes(saved_fname)
-            if grid_bytes:
-                grid_csv_name = f"digit_{saved_as}_{saved_fname}.csv"
-                st.download_button(
-                    "⬇ Download 28×28 grid CSV",
-                    grid_bytes, grid_csv_name, "text/csv",
-                    use_container_width=True,
-                )
-
-    with label_col:
-        corrected_digit = st.selectbox(
-            "Misclicked? Fix the label",
-            options=list(range(10)),
-            index=int(saved_as),
-            key="confirm_digit",
-        )
-        if corrected_digit != saved_as:
-            if st.button("↻ Re-save with corrected label",
-                         type="primary", use_container_width=True):
-                fname = save_sample(
-                    image=mnist_img,
-                    digit=int(corrected_digit),
-                    user_name=user_name,
-                    confidence=0.0,
-                )
-                result["saved_as"]    = corrected_digit
-                result["saved_fname"] = fname
-                st.session_state["last_result"] = result
-                st.success(f"Re-saved as digit {corrected_digit}")
-                st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── pipeline steps ───────────────────────────────────────────────────────
     if cfg["show_steps"]:
         st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-        st.markdown("<div class='section-label'>Preprocessing pipeline</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='section-label'>Preprocessing pipeline</div>", unsafe_allow_html=True)
         render_pipeline_steps(proc)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── pixel matrix ─────────────────────────────────────────────────────────
     if cfg["show_matrix"]:
         st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-        st.markdown("<div class='section-label'>Pixel matrix (28×28 · uint8)</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='section-label'>Pixel matrix (28×28 · uint8)</div>", unsafe_allow_html=True)
         render_pixel_matrix(mnist_img)
         st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dataset tab
+# Dataset tab/screen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _tab_dataset() -> None:
@@ -472,7 +468,6 @@ def _tab_dataset() -> None:
     m3.metric("Most drawn digit", f"{most_drawn}  ({summary['per_digit'][most_drawn]}×)")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── per-digit bar chart ──────────────────────────────────────────────────
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -499,7 +494,6 @@ def _tab_dataset() -> None:
     plt.close(fig)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── records table ────────────────────────────────────────────────────────
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
     records = load_csv_as_records()
     if records:
@@ -513,10 +507,8 @@ def _tab_dataset() -> None:
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── downloads ─────────────────────────────────────────────────────────────
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    st.markdown("<div class='section-label'>Download dataset</div>",
-                unsafe_allow_html=True)
+    st.markdown("<div class='section-label'>Download dataset</div>", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
 
@@ -547,6 +539,8 @@ def main() -> None:
 
     if "screen" not in st.session_state:
         st.session_state["screen"] = "welcome"
+    if "session_index" not in st.session_state:
+        st.session_state["session_index"] = 0
 
     screen = st.session_state.get("screen", "welcome")
 
@@ -557,37 +551,44 @@ def main() -> None:
     user_name = st.session_state.get("user_name", "User")
     cfg = _sidebar(user_name)
 
+    if screen == "dataset_only":
+        st.markdown(
+            f"<h1 style='font-size:1.6rem;margin-bottom:0'>✏️ MNIST Canvas</h1>",
+            unsafe_allow_html=True,
+        )
+        if st.button("← Back to drawing"):
+            st.session_state["screen"] = "canvas"
+            st.rerun()
+        _tab_dataset()
+        return
+
+    session_index = st.session_state.get("session_index", 0)
+
+    # ── session finished — show completion screen ──────────────────────────
+    if session_index >= TOTAL_DIGITS:
+        _screen_session_complete(user_name)
+        return
+
     st.markdown(
         f"<h1 style='font-size:1.6rem;margin-bottom:0'>✏️ MNIST Canvas</h1>"
         f"<p style='color:{_MUTED};font-size:0.88rem;margin-top:0.2rem'>"
         f"Hello <b style='color:{_ACCENT}'>{user_name}</b> · "
-        f"pick the digit you're about to draw, draw it, then process — saved automatically</p>",
+        f"draw each digit when prompted — it's saved automatically, then "
+        f"the next digit appears</p>",
         unsafe_allow_html=True,
     )
 
     tab_draw, tab_dataset = st.tabs(["🎨  Draw", "📊  Dataset"])
 
     with tab_draw:
+        _render_progress(session_index)
+
         left, right = st.columns([1, 1.5], gap="large")
 
         with left:
             st.markdown('<div class="ui-card">', unsafe_allow_html=True)
+            _render_target_digit(session_index)
 
-            # ── 1. Pick the digit BEFORE drawing ─────────────────────────────
-            st.markdown("<div class='digit-picker-label'>① Which digit are you about to draw?</div>",
-                        unsafe_allow_html=True)
-            picked_digit = st.radio(
-                "Digit",
-                options=list(range(10)),
-                index=st.session_state.get("picked_digit", 0),
-                horizontal=True,
-                label_visibility="collapsed",
-                key="digit_radio",
-            )
-            st.session_state["picked_digit"] = picked_digit
-
-            st.markdown("<div class='digit-picker-label' style='margin-top:1rem'>② Draw it here</div>",
-                        unsafe_allow_html=True)
             try:
                 from streamlit_drawable_canvas import st_canvas
             except ImportError:
@@ -602,14 +603,16 @@ def main() -> None:
                 height=cfg["canvas_size"],
                 width=cfg["canvas_size"],
                 drawing_mode="freedraw",
-                key="canvas",
+                key=f"canvas_{session_index}",
                 display_toolbar=True,
             )
 
             c1, c2 = st.columns(2)
-            process_btn = c1.button(f"✓ Save as \"{picked_digit}\"", type="primary",
-                                    use_container_width=True)
-            clear_btn   = c2.button("🗑 Clear",  use_container_width=True)
+            process_btn = c1.button(
+                f"✓ Save \"{session_index}\" & continue",
+                type="primary", use_container_width=True,
+            )
+            clear_btn = c2.button("🗑 Clear", use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
             if clear_btn:
@@ -621,7 +624,7 @@ def main() -> None:
                 if canvas_result is None or canvas_result.image_data is None:
                     st.info("Draw something first.")
                 elif canvas_result.image_data.max() == 0:
-                    st.warning("Canvas is empty — draw a digit first.")
+                    st.warning("Canvas is empty — draw the digit first.")
                 else:
                     raw: np.ndarray = canvas_result.image_data
                     proc = MNISTProcessor()
@@ -630,25 +633,24 @@ def main() -> None:
                     if mnist_img is None:
                         st.warning("No digit detected. Try a thicker or larger stroke.")
                     else:
-                        # ── automatic save — label was already chosen in
-                        # step ① before drawing started, so there's no
-                        # ambiguity and no extra confirmation step needed.
-                        fname = save_sample(
+                        # ── automatic save — label is always the digit the
+                        # session is currently asking for, never ambiguous.
+                        save_sample(
                             image=mnist_img,
-                            digit=int(picked_digit),
+                            digit=int(session_index),
                             user_name=user_name,
                             confidence=0.0,
                         )
                         st.session_state["last_result"] = {
-                            "proc":        proc,
-                            "mnist_img":   mnist_img,
-                            "saved":       True,
-                            "saved_as":    picked_digit,
-                            "saved_fname": fname,
+                            "proc": proc, "mnist_img": mnist_img,
+                            "saved_as": session_index,
                         }
+                        # advance to next digit in the session
+                        st.session_state["session_index"] = session_index + 1
+                        st.rerun()
 
             if "last_result" not in st.session_state:
-                st.info("Pick a digit, draw it, then click **Save**.")
+                st.info(f"Draw the digit **{session_index}**, then click Save.")
             else:
                 _render_results(user_name, cfg, st.session_state["last_result"])
 

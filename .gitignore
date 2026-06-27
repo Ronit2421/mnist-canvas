@@ -1,7 +1,7 @@
 # Secrets — NEVER commit real credentials
 .streamlit/secrets.toml
 
-# Local fallback dataset (not used once Supabase is configured)
+# Local fallback dataset (not used once Google Sheets is configured)
 dataset/
 
 # Trained classifier model (regenerates automatically on first run)

@@ -1,25 +1,24 @@
 # ✏️ MNIST Canvas
 
-A Streamlit app where anyone can draw a handwritten digit, get it converted
-into a true **MNIST-compatible 28×28 image**, see a live digit prediction,
-and contribute it to a **shared, persistent dataset** — visible to every
-user of the deployed app, not just stored on one person's machine.
+A Streamlit app that guides each visitor through drawing **every digit
+from 0 to 9, in order**, converts each into a true **MNIST-compatible
+28×28 image**, and automatically saves it to a **shared Google Sheet** —
+crowdsourcing a real, growing, correctly-labelled handwritten digit
+dataset.
 
 ---
 
 ## How it works
 
-1. Enter your name (just for tagging contributions)
-2. Draw a digit on the canvas
-3. Click **▶ Process** →
-   - Runs the real MNIST preprocessing pipeline (grayscale → denoise →
-     crop → resize → centre-of-mass alignment, exactly like the original
-     1998 MNIST dataset)
-   - A scikit-learn classifier predicts the digit + shows confidence
-   - The drawing is **auto-saved** to the shared dataset
-4. Wrong prediction? Pick the correct digit and re-save with the fixed label
-5. **Dataset tab** — see totals, per-digit counts, contributors, and
-   download the whole dataset as CSV or NumPy arrays
+1. Enter your name
+2. You're shown digit **0** — draw it, click Save → it's saved
+   automatically (the label is never ambiguous, since the app is always
+   asking for one specific digit)
+3. The app advances to digit **1**, then **2**, ... up to **9**
+4. After digit 9 is saved → "Session complete!" screen, with the option
+   to start a brand new 0–9 session
+5. **Dataset tab** — totals, per-digit counts, contributors, and
+   download buttons (CSV / NumPy) — reads live from the shared sheet
 
 ---
 
@@ -27,8 +26,8 @@ user of the deployed app, not just stored on one person's machine.
 
 | Mode | When | Where data goes |
 |------|------|------------------|
-| **Local fallback** | No Supabase configured | `dataset/` folder on disk — single machine only, wiped on restart if deployed |
-| **Cloud (Supabase)** | `SUPABASE_URL` + `SUPABASE_KEY` set | Shared Postgres table — every user's drawings land in the same place, persists forever |
+| **Local fallback** | No Google credentials configured | `dataset/` folder on disk — single machine only |
+| **Cloud (Google Sheets)** | `gcp_service_account` + `GOOGLE_SHEET_ID` set in secrets | Shared Google Sheet — every visitor's drawings land in the same place, persists forever |
 
 For a **live, multi-user app**, you need Cloud mode. Setup below.
 
@@ -42,30 +41,37 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Without Supabase configured, it still works — drawings save to a local
-`dataset/` folder. Good for trying things out before deploying.
+Without Google Sheets configured, it still works — drawings save to a
+local `dataset/` folder. Good for trying things out before deploying.
 
 ---
 
-## Deploying live with a shared dataset (Supabase + Streamlit Cloud)
+## Deploying live with a shared Google Sheets dataset
 
-### 1. Create a free Supabase project
+### 1. Create a Google Cloud service account
 
-1. Go to [supabase.com](https://supabase.com) → sign up → **New project**
-2. Wait ~2 minutes for it to provision
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) → create or select a project
+2. **APIs & Services → Library** → enable **Google Sheets API** and **Google Drive API**
+3. **IAM & Admin → Service Accounts** → **Create Service Account**
+4. Once created, open it → **Keys** tab → **Add Key → Create new key → JSON**
+5. This downloads a `.json` file — keep it safe, you'll copy values from it next
 
-### 2. Create the table
+### 2. Create the Google Sheet
 
-1. In your Supabase project → **SQL Editor** → **New query**
-2. Open `supabase_setup.sql` from this folder, paste its contents, click **Run**
+1. Go to [sheets.google.com](https://sheets.google.com) → create a new blank sheet
+2. Name it anything (e.g. "MNIST Dataset")
+3. Click **Share** → paste the service account's `client_email` (found in
+   the downloaded JSON) → give it **Editor** access
+4. Copy the **Sheet ID** from the URL:
+   ```
+   https://docs.google.com/spreadsheets/d/THIS_PART_IS_THE_ID/edit
+   ```
 
-This creates the `mnist_samples` table with the right columns, indexes,
-and public insert/read policies.
+### 3. Fill in your secrets
 
-### 3. Get your API credentials
-
-1. Project → **Settings** → **API**
-2. Copy the **Project URL** and the **anon public key**
+Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and
+fill in every field using values from your downloaded JSON key, plus the
+Sheet ID from step 2.
 
 ### 4. Push this project to GitHub
 
@@ -78,25 +84,19 @@ git remote add origin https://github.com/YOUR-USERNAME/mnist-canvas.git
 git push -u origin main
 ```
 
-> `.gitignore` already excludes `dataset/`, `*.joblib`, and
-> `.streamlit/secrets.toml` — your local data and secrets never get
-> pushed.
+> `.gitignore` already excludes `dataset/` and `.streamlit/secrets.toml`
+> — your local data and secrets never get pushed.
 
 ### 5. Deploy on Streamlit Community Cloud
 
 1. Go to [share.streamlit.io](https://share.streamlit.io) → sign in with GitHub
 2. **New app** → pick your repo → branch `main` → main file `app.py`
-3. Before clicking Deploy, open **Advanced settings → Secrets** and paste:
-
-```toml
-SUPABASE_URL = "https://YOUR-PROJECT-REF.supabase.co"
-SUPABASE_KEY = "YOUR-ANON-PUBLIC-KEY"
-```
-
+3. Before clicking Deploy, open **Advanced settings → Secrets** and paste
+   the entire contents of your filled-in `secrets.toml`
 4. Click **Deploy**
 
-Your app is now live at `https://your-app-name.streamlit.app`, and every
-visitor's drawings save to the same shared Supabase table.
+Your app is now live, and every visitor's drawings save to the same
+shared Google Sheet.
 
 ---
 
@@ -121,23 +121,12 @@ Output: `(28, 28)` `uint8`, values `[0, 255]`, white digit on black background.
 
 ---
 
-## Classifier
+## Dataset format
 
-`RandomForestClassifier(n_estimators=500)` trained on scikit-learn's
-built-in `load_digits` dataset (upscaled 8×8 → 28×28). No internet
-download required, trains in a few seconds on first launch, then cached
-to `mnist_clf.joblib` (regenerated automatically — also git-ignored).
+Google Sheet columns: `timestamp, user_name, label, pixel_0, ..., pixel_783`
+— one row per drawing.
 
----
-
-## Dataset formats
-
-Every saved drawing is stored two ways:
-
-1. **Flattened** (ML-ready, Kaggle-style): `user, label, pixel_0, ..., pixel_783`
-   — one row per sample, downloadable as `mnist_dataset.csv`
-2. **Grid** (human-readable): a real 28×28 grid you can open and visually
-   see the digit's shape in — downloadable per-sample from the result panel
-
-Plus `.npy` exports (`dataset.npy` shape `(N,28,28)`, `labels.npy` shape `(N,)`)
-for quick numpy-based model training.
+Downloadable as:
+- `mnist_dataset.csv` — flattened, ML-ready (`user, label, pixel_0..pixel_783`)
+- `dataset.npy` / `labels.npy` — numpy arrays, shapes `(N,28,28)` and `(N,)`
+- Per-drawing 28×28 grid CSV — open it and visually see the digit's shape
