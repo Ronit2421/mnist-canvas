@@ -219,10 +219,11 @@ def load_csv_as_records() -> list[dict]:
     if not os.path.exists(_CSV_PATH):
         return []
     with open(_CSV_PATH, newline="") as f:
-        return [
-            {"user_name": r["user_name"], "label": r["label"]}
-            for r in csv.DictReader(f)
-        ]
+        records = []
+        for r in csv.DictReader(f):
+            if "user_name" in r and "label" in r:
+                records.append({"user_name": r["user_name"], "label": r["label"]})
+        return records
 
 
 def total_samples() -> int:
