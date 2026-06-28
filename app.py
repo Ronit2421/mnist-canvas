@@ -226,6 +226,46 @@ def _css() -> None:
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_dataset_summary() -> dict:
+    """
+    Cached wrapper around dataset_summary().
+
+    Streamlit reruns the whole script on almost every interaction
+    (dragging a slider, toggling a switch, clicking any button) — without
+    this cache, every single one of those reruns would re-fetch the
+    ENTIRE Google Sheet, which blows through Google's free-tier API quota
+    (60 read requests/minute/user) almost instantly. Caching for 15
+    seconds means the sidebar stats only actually hit the network a few
+    times a minute, no matter how much the user clicks around.
+    """
+    return dataset_summary()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_total_samples() -> int:
+    """Cached wrapper around total_samples() — see _cached_dataset_summary()."""
+    return total_samples()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_records() -> list[dict]:
+    """Cached wrapper around load_csv_as_records() — see _cached_dataset_summary()."""
+    return load_csv_as_records()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_csv_bytes() -> bytes | None:
+    """Cached wrapper around get_csv_bytes() — see _cached_dataset_summary()."""
+    return get_csv_bytes()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_npy_bytes() -> tuple[bytes | None, bytes | None]:
+    """Cached wrapper around get_npy_bytes() — see _cached_dataset_summary()."""
+    return get_npy_bytes()
+
+
 def _sidebar(user_name: str) -> dict:
     with st.sidebar:
         st.markdown(f"""
@@ -260,7 +300,7 @@ def _sidebar(user_name: str) -> dict:
         show_matrix = st.toggle("Show pixel matrix",   value=False)
 
         st.divider()
-        summary = dataset_summary()
+        summary = _cached_dataset_summary()
         st.markdown(f"**Dataset** · {summary['total']} samples")
         if summary["per_digit"]:
             for d, cnt in summary["per_digit"].items():
@@ -320,7 +360,7 @@ def _screen_welcome() -> None:
 
         st.markdown(
             f"<div style='text-align:center;color:{_MUTED};font-size:0.78rem;"
-            f"margin-top:1rem'>{total_samples()} drawings saved so far</div>",
+            f"margin-top:1rem'>{_cached_total_samples()} drawings saved so far</div>",
             unsafe_allow_html=True,
         )
 
@@ -453,7 +493,7 @@ def _tab_dataset() -> None:
         unsafe_allow_html=True,
     )
 
-    summary = dataset_summary()
+    summary = _cached_dataset_summary()
     n = summary["total"]
 
     if n == 0:
@@ -495,7 +535,7 @@ def _tab_dataset() -> None:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    records = load_csv_as_records()
+    records = _cached_records()
     if records:
         compact = [{"#": i + 1, "user": r["user_name"], "label": r["label"]}
                    for i, r in enumerate(records)]
@@ -512,13 +552,13 @@ def _tab_dataset() -> None:
 
     c1, c2, c3 = st.columns(3)
 
-    csv_bytes = get_csv_bytes()
+    csv_bytes = _cached_csv_bytes()
     if csv_bytes:
         c1.download_button("⬇ mnist_dataset.csv", csv_bytes,
                            "mnist_dataset.csv", "text/csv",
                            use_container_width=True)
 
-    imgs_bytes, lbls_bytes = get_npy_bytes()
+    imgs_bytes, lbls_bytes = _cached_npy_bytes()
     if imgs_bytes:
         c2.download_button("⬇ dataset.npy", imgs_bytes,
                            "mnist_dataset.npy", "application/octet-stream",
@@ -635,19 +675,40 @@ def main() -> None:
                     else:
                         # ── automatic save — label is always the digit the
                         # session is currently asking for, never ambiguous.
-                        save_sample(
-                            image=mnist_img,
-                            digit=int(session_index),
-                            user_name=user_name,
-                            confidence=0.0,
-                        )
-                        st.session_state["last_result"] = {
-                            "proc": proc, "mnist_img": mnist_img,
-                            "saved_as": session_index,
-                        }
-                        # advance to next digit in the session
-                        st.session_state["session_index"] = session_index + 1
-                        st.rerun()
+                        try:
+                            save_sample(
+                                image=mnist_img,
+                                digit=int(session_index),
+                                user_name=user_name,
+                                confidence=0.0,
+                            )
+                            # Invalidate cached reads so sidebar/dataset
+                            # tab reflect this new sample immediately,
+                            # rather than showing stale counts for up to
+                            # 15s (the cache TTL).
+                            _cached_dataset_summary.clear()
+                            _cached_total_samples.clear()
+                            _cached_records.clear()
+                            _cached_csv_bytes.clear()
+                            _cached_npy_bytes.clear()
+
+                            st.session_state["last_result"] = {
+                                "proc": proc, "mnist_img": mnist_img,
+                                "saved_as": session_index,
+                            }
+                            # advance to next digit in the session
+                            st.session_state["session_index"] = session_index + 1
+                            st.rerun()
+                        except Exception as e:
+                            if "429" in str(e) or "Quota exceeded" in str(e):
+                                st.error(
+                                    "Google Sheets is temporarily rate-limited "
+                                    "(too many requests this minute). Please "
+                                    "wait about 30–60 seconds, then click Save again — "
+                                    "your drawing has NOT been lost, just try again."
+                                )
+                            else:
+                                st.error(f"Save failed: {e}")
 
             if "last_result" not in st.session_state:
                 st.info(f"Draw the digit **{session_index}**, then click Save.")

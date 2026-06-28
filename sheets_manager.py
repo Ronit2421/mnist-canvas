@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import csv
+import logging
 import numpy as np
 from datetime import datetime
 from PIL import Image
@@ -191,9 +192,64 @@ def save_sample(
         flat = image.astype(np.uint8).flatten().tolist()
         row = [datetime.now().isoformat(timespec="seconds"), user_name, int(digit)] + flat
         worksheet.append_row(row, value_input_option="RAW")
+        _invalidate_cache()
         return f"{user_name}_{digit}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
     return _save_local(image, digit, user_name)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cached sheet reads
+#
+# Streamlit reruns the whole script on almost every interaction (typing,
+# drawing, clicking). Without caching, every rerun would re-fetch the
+# entire sheet from Google's API — for a 10-digit session, that's enough
+# calls per minute to blow through the free-tier read quota and trigger
+# HTTP 429 "Quota exceeded" errors.
+#
+# st.cache_data keeps one fetch result in memory for a few seconds and
+# reuses it across reruns, so the sheet is only actually read once every
+# few seconds no matter how many times the page reruns in that window.
+# Saving a new sample explicitly clears this cache so the next read
+# picks up the fresh row immediately instead of waiting out the TTL.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cached_get_all_values() -> list[list[str]]:
+    """Cached wrapper around worksheet.get_all_values() (cloud mode only)."""
+    try:
+        import streamlit as st
+    except Exception:
+        worksheet = _get_worksheet()
+        if worksheet is None:
+            return []
+        try:
+            return worksheet.get_all_values()
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=10, show_spinner=False)
+    def _fetch(_cache_key: int) -> list[list[str]]:
+        worksheet = _get_worksheet()
+        if worksheet is None:
+            return []
+        try:
+            return worksheet.get_all_values()
+        except Exception as e:
+            # Rate-limited (HTTP 429) or any other transient API error —
+            # degrade gracefully to "no data" rather than crashing the
+            # whole app. The sidebar/dataset tab will just show 0 samples
+            # until the next successful fetch instead of raising.
+            logging.getLogger(__name__).warning(
+                "Google Sheets read failed, returning empty: %s", e
+            )
+            return []
+
+    return _fetch(_sheet_client_cache.get("cache_key", 0))
+
+
+def _invalidate_cache() -> None:
+    """Force the next read to bypass the cache (called right after a save)."""
+    _sheet_client_cache["cache_key"] = _sheet_client_cache.get("cache_key", 0) + 1
 
 
 def load_csv_as_records() -> list[dict]:
@@ -201,7 +257,7 @@ def load_csv_as_records() -> list[dict]:
     worksheet = _get_worksheet()
 
     if worksheet is not None:
-        all_values = worksheet.get_all_values()
+        all_values = _cached_get_all_values()
         if len(all_values) < 2:
             return []
         header = all_values[0]
@@ -231,7 +287,7 @@ def total_samples() -> int:
     worksheet = _get_worksheet()
     if worksheet is not None:
         try:
-            return max(len(worksheet.get_all_values()) - 1, 0)
+            return max(len(_cached_get_all_values()) - 1, 0)
         except Exception:
             return 0
     if os.path.exists(_NPY_LBL):
@@ -267,7 +323,7 @@ def get_csv_bytes() -> bytes | None:
     worksheet = _get_worksheet()
 
     if worksheet is not None:
-        all_values = worksheet.get_all_values()
+        all_values = _cached_get_all_values()
         if len(all_values) < 2:
             return None
         header = all_values[0]
@@ -302,7 +358,7 @@ def get_npy_bytes() -> tuple[bytes, bytes] | tuple[None, None]:
     worksheet = _get_worksheet()
 
     if worksheet is not None:
-        all_values = worksheet.get_all_values()
+        all_values = _cached_get_all_values()
         if len(all_values) < 2:
             return None, None
         header = all_values[0]
