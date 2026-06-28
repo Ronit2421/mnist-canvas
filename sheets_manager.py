@@ -94,36 +94,49 @@ def _get_worksheet():
     import gspread
     from google.oauth2.service_account import Credentials
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-
-    sheet_id = st.secrets["GOOGLE_SHEET_ID"]
-    spreadsheet = client.open_by_key(sheet_id)
-
     try:
-        worksheet = spreadsheet.worksheet(_WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=_WORKSHEET_NAME, rows=1000, cols=len(_SHEET_HEADER)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+
+        sheet_id = st.secrets["GOOGLE_SHEET_ID"]
+        spreadsheet = client.open_by_key(sheet_id)
+
+        try:
+            worksheet = spreadsheet.worksheet(_WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(
+                title=_WORKSHEET_NAME, rows=1000, cols=len(_SHEET_HEADER)
+            )
+            worksheet.append_row(_SHEET_HEADER, value_input_option="RAW")
+
+        # Ensure header exists even if the worksheet already existed but was empty
+        first_row = worksheet.row_values(1)
+        if not first_row:
+            worksheet.append_row(_SHEET_HEADER, value_input_option="RAW")
+
+        _sheet_client_cache["worksheet"] = worksheet
+        logging.getLogger(__name__).info(
+            "_get_worksheet() FIRST-TIME setup took %.0fms (auth + open + worksheet lookup)",
+            (time.time() - _t0) * 1000,
         )
-        worksheet.append_row(_SHEET_HEADER, value_input_option="RAW")
-
-    # Ensure header exists even if the worksheet already existed but was empty
-    first_row = worksheet.row_values(1)
-    if not first_row:
-        worksheet.append_row(_SHEET_HEADER, value_input_option="RAW")
-
-    _sheet_client_cache["worksheet"] = worksheet
-    logging.getLogger(__name__).info(
-        "_get_worksheet() FIRST-TIME setup took %.0fms (auth + open + worksheet lookup)",
-        (time.time() - _t0) * 1000,
-    )
-    return worksheet
+        return worksheet
+    except Exception as e:
+        # TEMPORARY DIAGNOSTIC: surface connection/auth errors in the UI.
+        # Remove this block once root cause is confirmed and fixed.
+        logging.getLogger(__name__).error(
+            "_get_worksheet() setup FAILED: %s: %s", type(e).__name__, e
+        )
+        try:
+            st.error(f"🔍 DIAGNOSTIC — Google Sheets connection failed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        _sheet_client_cache["worksheet"] = None
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -243,6 +256,14 @@ def _raw_get_all_values() -> list[list[str]]:
         logging.getLogger(__name__).warning(
             "Google Sheets read failed, returning empty: %s", e
         )
+        # TEMPORARY DIAGNOSTIC: also surface the real error in the UI so
+        # it's visible without needing to dig through Cloud logs. Remove
+        # this block once the root cause is confirmed and fixed.
+        try:
+            import streamlit as st
+            st.error(f"🔍 DIAGNOSTIC — Google Sheets read failed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
         return []
 
 
