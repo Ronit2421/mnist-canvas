@@ -51,6 +51,7 @@ from sheets_manager import (
     get_grid_csv_bytes,
     image_to_grid_csv_bytes,
     load_csv_as_records,
+    clear_sheet_cache,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -226,45 +227,18 @@ def _css() -> None:
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=15, show_spinner=False)
-def _cached_dataset_summary() -> dict:
-    """
-    Cached wrapper around dataset_summary().
-
-    Streamlit reruns the whole script on almost every interaction
-    (dragging a slider, toggling a switch, clicking any button) — without
-    this cache, every single one of those reruns would re-fetch the
-    ENTIRE Google Sheet, which blows through Google's free-tier API quota
-    (60 read requests/minute/user) almost instantly. Caching for 15
-    seconds means the sidebar stats only actually hit the network a few
-    times a minute, no matter how much the user clicks around.
-    """
-    return dataset_summary()
-
-
-@st.cache_data(ttl=15, show_spinner=False)
-def _cached_total_samples() -> int:
-    """Cached wrapper around total_samples() — see _cached_dataset_summary()."""
-    return total_samples()
-
-
-@st.cache_data(ttl=15, show_spinner=False)
-def _cached_records() -> list[dict]:
-    """Cached wrapper around load_csv_as_records() — see _cached_dataset_summary()."""
-    return load_csv_as_records()
-
-
-@st.cache_data(ttl=15, show_spinner=False)
-def _cached_csv_bytes() -> bytes | None:
-    """Cached wrapper around get_csv_bytes() — see _cached_dataset_summary()."""
-    return get_csv_bytes()
-
-
-@st.cache_data(ttl=15, show_spinner=False)
-def _cached_npy_bytes() -> tuple[bytes | None, bytes | None]:
-    """Cached wrapper around get_npy_bytes() — see _cached_dataset_summary()."""
-    return get_npy_bytes()
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# NOTE on caching: sheets_manager.py already caches the underlying Google
+# Sheets read internally (a single _st_cached_fetch layer, TTL=10s) and
+# exposes a clear_cache() function to invalidate it after a save. app.py
+# calls the plain dataset_summary() / total_samples() / etc. functions
+# directly — wrapping them in a SECOND, independent st.cache_data layer
+# here previously caused the dashboard to show stale/inconsistent data,
+# since the two cache layers had different TTLs and invalidation timing.
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _sidebar(user_name: str) -> dict:
     with st.sidebar:
@@ -300,7 +274,7 @@ def _sidebar(user_name: str) -> dict:
         show_matrix = st.toggle("Show pixel matrix",   value=False)
 
         st.divider()
-        summary = _cached_dataset_summary()
+        summary = dataset_summary()
         st.markdown(f"**Dataset** · {summary['total']} samples")
         if summary["per_digit"]:
             for d, cnt in summary["per_digit"].items():
@@ -360,7 +334,7 @@ def _screen_welcome() -> None:
 
         st.markdown(
             f"<div style='text-align:center;color:{_MUTED};font-size:0.78rem;"
-            f"margin-top:1rem'>{_cached_total_samples()} drawings saved so far</div>",
+            f"margin-top:1rem'>{total_samples()} drawings saved so far</div>",
             unsafe_allow_html=True,
         )
 
@@ -493,7 +467,7 @@ def _tab_dataset() -> None:
         unsafe_allow_html=True,
     )
 
-    summary = _cached_dataset_summary()
+    summary = dataset_summary()
     n = summary["total"]
 
     if n == 0:
@@ -501,11 +475,9 @@ def _tab_dataset() -> None:
         return
 
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    m1, m2, m3 = st.columns(3)
+    m1, m2 = st.columns(2)
     m1.metric("Total samples", n)
     m2.metric("Contributors", len(summary["contributors"]))
-    most_drawn = max(summary["per_digit"], key=summary["per_digit"].get)
-    m3.metric("Most drawn digit", f"{most_drawn}  ({summary['per_digit'][most_drawn]}×)")
     st.markdown('</div>', unsafe_allow_html=True)
 
     import matplotlib
@@ -535,7 +507,7 @@ def _tab_dataset() -> None:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-    records = _cached_records()
+    records = load_csv_as_records()
     if records:
         compact = [{"#": i + 1, "user": r["user_name"], "label": r["label"]}
                    for i, r in enumerate(records)]
@@ -552,13 +524,13 @@ def _tab_dataset() -> None:
 
     c1, c2, c3 = st.columns(3)
 
-    csv_bytes = _cached_csv_bytes()
+    csv_bytes = get_csv_bytes()
     if csv_bytes:
         c1.download_button("⬇ mnist_dataset.csv", csv_bytes,
                            "mnist_dataset.csv", "text/csv",
                            use_container_width=True)
 
-    imgs_bytes, lbls_bytes = _cached_npy_bytes()
+    imgs_bytes, lbls_bytes = get_npy_bytes()
     if imgs_bytes:
         c2.download_button("⬇ dataset.npy", imgs_bytes,
                            "mnist_dataset.npy", "application/octet-stream",
@@ -686,11 +658,7 @@ def main() -> None:
                             # tab reflect this new sample immediately,
                             # rather than showing stale counts for up to
                             # 15s (the cache TTL).
-                            _cached_dataset_summary.clear()
-                            _cached_total_samples.clear()
-                            _cached_records.clear()
-                            _cached_csv_bytes.clear()
-                            _cached_npy_bytes.clear()
+                            clear_sheet_cache()
 
                             st.session_state["last_result"] = {
                                 "proc": proc, "mnist_img": mnist_img,

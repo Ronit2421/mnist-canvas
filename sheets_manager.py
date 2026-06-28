@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import csv
+import time
 import logging
 import numpy as np
 from datetime import datetime
@@ -82,6 +83,7 @@ def _get_worksheet():
     if _sheet_client_cache["checked"]:
         return _sheet_client_cache["worksheet"]
 
+    _t0 = time.time()
     _sheet_client_cache["checked"] = True
 
     if not is_cloud_mode():
@@ -117,6 +119,10 @@ def _get_worksheet():
         worksheet.append_row(_SHEET_HEADER, value_input_option="RAW")
 
     _sheet_client_cache["worksheet"] = worksheet
+    logging.getLogger(__name__).info(
+        "_get_worksheet() FIRST-TIME setup took %.0fms (auth + open + worksheet lookup)",
+        (time.time() - _t0) * 1000,
+    )
     return worksheet
 
 
@@ -189,10 +195,18 @@ def save_sample(
     worksheet = _get_worksheet()
 
     if worksheet is not None:
+        _t0 = time.time()
         flat = image.astype(np.uint8).flatten().tolist()
         row = [datetime.now().isoformat(timespec="seconds"), user_name, int(digit)] + flat
+        _t1 = time.time()
         worksheet.append_row(row, value_input_option="RAW")
+        _t2 = time.time()
         _invalidate_cache()
+        _t3 = time.time()
+        logging.getLogger(__name__).info(
+            "save_sample timing — build row: %.0fms | append_row (network): %.0fms | invalidate: %.0fms | TOTAL: %.0fms",
+            (_t1 - _t0) * 1000, (_t2 - _t1) * 1000, (_t3 - _t2) * 1000, (_t3 - _t0) * 1000,
+        )
         return f"{user_name}_{digit}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
     return _save_local(image, digit, user_name)
@@ -214,42 +228,82 @@ def save_sample(
 # picks up the fresh row immediately instead of waiting out the TTL.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _raw_get_all_values() -> list[list[str]]:
+    """Uncached, direct read of the entire worksheet (cloud mode only)."""
+    worksheet = _get_worksheet()
+    if worksheet is None:
+        return []
+    try:
+        return worksheet.get_all_values()
+    except Exception as e:
+        # Rate-limited (HTTP 429) or any other transient API error —
+        # degrade gracefully to "no data" rather than crashing the whole
+        # app. The sidebar/dataset tab will just show 0 samples until
+        # the next successful fetch instead of raising.
+        logging.getLogger(__name__).warning(
+            "Google Sheets read failed, returning empty: %s", e
+        )
+        return []
+
+
+# Single, module-level cached function — defined exactly ONCE at import
+# time (not re-created inside another function on every call, which was
+# the root cause of unpredictable cache behaviour). Falls back to an
+# uncached passthrough if streamlit isn't importable (e.g. plain
+# local/test usage outside the Streamlit runtime).
+try:
+    import streamlit as _st_for_cache
+
+    @_st_for_cache.cache_data(ttl=10, show_spinner=False)
+    def _st_cached_fetch(_cache_key: int) -> list[list[str]]:
+        return _raw_get_all_values()
+
+except Exception:
+    def _st_cached_fetch(_cache_key: int) -> list[list[str]]:
+        return _raw_get_all_values()
+    _st_cached_fetch.clear = lambda: None  # no-op when streamlit unavailable
+
+
 def _cached_get_all_values() -> list[list[str]]:
-    """Cached wrapper around worksheet.get_all_values() (cloud mode only)."""
+    """
+    Cached wrapper around _raw_get_all_values() (cloud mode only).
+
+    IMPORTANT: this module only provides ONE layer of caching for sheet
+    reads (this function). app.py should call the plain, UNCACHED
+    functions below (load_csv_as_records, dataset_summary, etc.) — NOT
+    wrap them in a second st.cache_data layer itself. Having two
+    independent cache layers stacked on top of each other was the root
+    cause of the dashboard showing stale/wrong data: app.py's outer
+    cache and this inner cache had different TTLs and different
+    invalidation timing, so clearing one didn't guarantee the other was
+    also fresh.
+    """
     try:
         import streamlit as st
     except Exception:
-        worksheet = _get_worksheet()
-        if worksheet is None:
-            return []
-        try:
-            return worksheet.get_all_values()
-        except Exception:
-            return []
+        return _raw_get_all_values()
 
-    @st.cache_data(ttl=10, show_spinner=False)
-    def _fetch(_cache_key: int) -> list[list[str]]:
-        worksheet = _get_worksheet()
-        if worksheet is None:
-            return []
-        try:
-            return worksheet.get_all_values()
-        except Exception as e:
-            # Rate-limited (HTTP 429) or any other transient API error —
-            # degrade gracefully to "no data" rather than crashing the
-            # whole app. The sidebar/dataset tab will just show 0 samples
-            # until the next successful fetch instead of raising.
-            logging.getLogger(__name__).warning(
-                "Google Sheets read failed, returning empty: %s", e
-            )
-            return []
-
-    return _fetch(_sheet_client_cache.get("cache_key", 0))
+    return _st_cached_fetch(_sheet_client_cache.get("cache_key", 0))
 
 
 def _invalidate_cache() -> None:
     """Force the next read to bypass the cache (called right after a save)."""
     _sheet_client_cache["cache_key"] = _sheet_client_cache.get("cache_key", 0) + 1
+    try:
+        _st_cached_fetch.clear()
+    except Exception:
+        pass
+
+
+def clear_sheet_cache() -> None:
+    """
+    Public alias for _invalidate_cache(), for callers outside this module
+    (e.g. app.py) that want to force a fresh read on the next call —
+    normally not needed since save_sample() already does this
+    automatically, but exposed for explicit/manual cache-busting.
+    """
+    _invalidate_cache()
+
 
 
 def load_csv_as_records() -> list[dict]:
