@@ -126,15 +126,12 @@ def _get_worksheet():
         )
         return worksheet
     except Exception as e:
-        # TEMPORARY DIAGNOSTIC: surface connection/auth errors in the UI.
-        # Remove this block once root cause is confirmed and fixed.
+        # Connection/auth failed — degrade gracefully to local fallback
+        # rather than crashing the whole app. Logged for debugging via
+        # Streamlit Cloud's log viewer if this ever happens again.
         logging.getLogger(__name__).error(
             "_get_worksheet() setup FAILED: %s: %s", type(e).__name__, e
         )
-        try:
-            st.error(f"🔍 DIAGNOSTIC — Google Sheets connection failed: {type(e).__name__}: {e}")
-        except Exception:
-            pass
         _sheet_client_cache["worksheet"] = None
         return None
 
@@ -256,14 +253,6 @@ def _raw_get_all_values() -> list[list[str]]:
         logging.getLogger(__name__).warning(
             "Google Sheets read failed, returning empty: %s", e
         )
-        # TEMPORARY DIAGNOSTIC: also surface the real error in the UI so
-        # it's visible without needing to dig through Cloud logs. Remove
-        # this block once the root cause is confirmed and fixed.
-        try:
-            import streamlit as st
-            st.error(f"🔍 DIAGNOSTIC — Google Sheets read failed: {type(e).__name__}: {e}")
-        except Exception:
-            pass
         return []
 
 
