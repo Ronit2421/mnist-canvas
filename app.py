@@ -35,6 +35,7 @@ st.set_page_config(
 )
 
 from mnist_processor import MNISTProcessor
+from classifier import DigitClassifier
 from ui_components import (
     render_pixel_matrix,
     render_mnist_image,
@@ -55,6 +56,19 @@ from sheets_manager import (
 )
 
 logging.basicConfig(level=logging.INFO)
+
+
+@st.cache_resource(show_spinner="Training digit classifier (one-time, ~3 min)… please wait ☕")
+def _get_classifier() -> DigitClassifier:
+    """
+    Load (or train) the digit classifier once per Streamlit server process
+    and cache it in memory. st.cache_resource keeps the same object alive
+    across all user sessions and reruns — no re-training on every click.
+    """
+    clf = DigitClassifier()
+    clf._ensure_loaded()   # train now so first prediction is instant
+    return clf
+
 
 # ── modern light palette ─────────────────────────────────────────────────────
 _BG       = "#FFFFFF"
@@ -227,19 +241,6 @@ def _css() -> None:
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sidebar
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# NOTE on caching: sheets_manager.py already caches the underlying Google
-# Sheets read internally (a single _st_cached_fetch layer, TTL=10s) and
-# exposes a clear_cache() function to invalidate it after a save. app.py
-# calls the plain dataset_summary() / total_samples() / etc. functions
-# directly — wrapping them in a SECOND, independent st.cache_data layer
-# here previously caused the dashboard to show stale/inconsistent data,
-# since the two cache layers had different TTLs and invalidation timing.
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _sidebar(user_name: str) -> dict:
     with st.sidebar:
         st.markdown(f"""
@@ -264,14 +265,14 @@ def _sidebar(user_name: str) -> dict:
 
         st.divider()
         st.markdown("**Canvas**")
-        stroke_width = st.slider("Stroke width (px)", 8, 40, 22)
+        stroke_width = st.slider("Stroke width (px)", 8, 40, 18)
         stroke_color = st.color_picker("Stroke colour", "#FFFFFF")
         canvas_size  = st.selectbox("Canvas size", [280, 400, 560], index=0)
 
         st.divider()
         st.markdown("**Preprocessing**")
-        show_steps  = st.toggle("Show pipeline steps", value=False)
-        show_matrix = st.toggle("Show pixel matrix",   value=False)
+        show_steps  = st.toggle("Show pipeline steps", value=True)
+        show_matrix = st.toggle("Show pixel matrix",   value=True)
 
         st.divider()
         summary = dataset_summary()
@@ -317,7 +318,7 @@ def _screen_welcome() -> None:
     _, centre, _ = st.columns([1, 1.2, 1])
     with centre:
         name = st.text_input(
-            "Your name", placeholder="e.g. Ronit",
+            "Your name", placeholder="e.g. Alice",
             label_visibility="collapsed", key="name_input",
         )
         if st.button("Start session  →", type="primary", use_container_width=True):
@@ -362,8 +363,8 @@ def _render_target_digit(session_index: int) -> None:
     <div class="target-digit-wrap">
       <div class="target-digit-circle">{session_index}</div>
       <div class="target-digit-meta">
-        Draw this digit · <b>{session_index + 1} of {TOTAL_DIGITS}</b> in your session
-      </div>
+  Draw this digit · <b>{session_index} to 9</b> in your session
+</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -645,38 +646,42 @@ def main() -> None:
                     if mnist_img is None:
                         st.warning("No digit detected. Try a thicker or larger stroke.")
                     else:
-                        # ── automatic save — label is always the digit the
-                        # session is currently asking for, never ambiguous.
-                        try:
-                            save_sample(
-                                image=mnist_img,
-                                digit=int(session_index),
-                                user_name=user_name,
-                                confidence=0.0,
-                            )
-                            # Invalidate cached reads so sidebar/dataset
-                            # tab reflect this new sample immediately,
-                            # rather than showing stale counts for up to
-                            # 15s (the cache TTL).
-                            clear_sheet_cache()
+                        # ── classify the drawing first ────────────────────
+                        clf = _get_classifier()
+                        predicted, confidence = clf.predict(mnist_img)
 
-                            st.session_state["last_result"] = {
-                                "proc": proc, "mnist_img": mnist_img,
-                                "saved_as": session_index,
-                            }
-                            # advance to next digit in the session
-                            st.session_state["session_index"] = session_index + 1
-                            st.rerun()
-                        except Exception as e:
-                            if "429" in str(e) or "Quota exceeded" in str(e):
-                                st.error(
-                                    "Google Sheets is temporarily rate-limited "
-                                    "(too many requests this minute). Please "
-                                    "wait about 30–60 seconds, then click Save again — "
-                                    "your drawing has NOT been lost, just try again."
+                        # Enforce blocking only if the structural similarity matches 
+                        # an entirely different number category confidently.
+                        BLOCK_THRESHOLD = 0.50
+
+                        if predicted != session_index and confidence >= BLOCK_THRESHOLD:
+                            st.error(
+                                f"❌ That looks like a **{predicted}** "
+                                f"({confidence*100:.0f}% confident), "
+                                f"but you are supposed to be drawing a **{session_index}**. "
+                                f"Please clear the canvas and try again!"
+                            )
+                        else:
+                            # Drawing passes structural check -> Save sample!
+                            try:
+                                save_sample(
+                                    image=mnist_img,
+                                    digit=int(session_index),
+                                    user_name=user_name,
+                                    confidence=confidence,
                                 )
-                            else:
-                                st.error(f"Save failed: {e}")
+                                clear_sheet_cache()
+                                st.session_state["last_result"] = {
+                                    "proc": proc, "mnist_img": mnist_img,
+                                    "saved_as": session_index,
+                                }
+                                st.session_state["session_index"] = session_index + 1
+                                st.rerun()
+                            except Exception as e:
+                                if "429" in str(e) or "Quota exceeded" in str(e):
+                                    st.error("Google Sheets rate limit hit. Wait a moment and try again.")
+                                else:
+                                    st.error(f"Save failed: {e}")
 
             if "last_result" not in st.session_state:
                 st.info(f"Draw the digit **{session_index}**, then click Save.")
