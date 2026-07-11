@@ -23,7 +23,6 @@ def _train_and_save() -> None:
     from sklearn.neighbors import KNeighborsClassifier
     from sklearn.model_selection import train_test_split
     from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import StandardScaler
 
     logger.info("Fetching authentic 28×28 MNIST data from OpenML (one-time download)...")
     
@@ -31,9 +30,10 @@ def _train_and_save() -> None:
     X, y = fetch_openml("mnist_784", version=1, return_X_y=True, as_frame=False, parser="auto")
     y = y.astype(np.int32)
     
-    # Use 15,000 samples for a perfect balance between high accuracy and fast caching
+    # Use 40,000 samples — more coverage of digit-shape variation than the
+    # previous 15,000, while still training/caching in a reasonable time.
     X_sub, _, y_sub, _ = train_test_split(
-        X, y, train_size=15000, stratify=y, random_state=42
+        X, y, train_size=40000, stratify=y, random_state=42
     )
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -41,9 +41,11 @@ def _train_and_save() -> None:
     )
 
     logger.info("Training a K-Neighbors Classifier for structural stroke validation...")
+    # No StandardScaler: MNIST pixels are already on one consistent 0-255
+    # scale, and per-pixel scaling blows up the (near-zero-variance) corner
+    # pixels, adding noise to the distance metric instead of removing it.
     pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("knn", KNeighborsClassifier(n_neighbors=5, weights="distance", n_jobs=-1)),
+        ("knn", KNeighborsClassifier(n_neighbors=9, weights="distance", n_jobs=-1)),
     ])
     
     pipe.fit(X_train, y_train)
