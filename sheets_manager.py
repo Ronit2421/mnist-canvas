@@ -64,8 +64,7 @@ _WORKSHEET_NAME = "mnist_samples"
 # Cloud (Google Sheets) client — lazily constructed, cached for the process
 # ─────────────────────────────────────────────────────────────────────────────
 
-_sheet_client_cache: dict = {"worksheet": None, "checked": False, "last_failure": 0.0}
-_RETRY_COOLDOWN_SECONDS = 30  # don't hammer Google's API on every Streamlit rerun
+_sheet_client_cache: dict = {"worksheet": None, "checked": False}
 
 
 def is_cloud_mode() -> bool:
@@ -84,18 +83,10 @@ def _get_worksheet():
     if _sheet_client_cache["checked"]:
         return _sheet_client_cache["worksheet"]
 
-    # If we failed recently, don't retry on *every* Streamlit rerun — wait
-    # out a short cooldown so a real outage doesn't hammer Google's API.
-    since_failure = time.time() - _sheet_client_cache["last_failure"]
-    if _sheet_client_cache["last_failure"] and since_failure < _RETRY_COOLDOWN_SECONDS:
-        return None
-
     _t0 = time.time()
+    _sheet_client_cache["checked"] = True
 
     if not is_cloud_mode():
-        # Not a transient issue — secrets genuinely aren't configured.
-        # Safe to cache permanently; no point retrying every rerun.
-        _sheet_client_cache["checked"] = True
         _sheet_client_cache["worksheet"] = None
         return None
 
@@ -128,10 +119,7 @@ def _get_worksheet():
         if not first_row:
             worksheet.append_row(_SHEET_HEADER, value_input_option="RAW")
 
-        # Only cache success permanently for this process.
-        _sheet_client_cache["checked"] = True
         _sheet_client_cache["worksheet"] = worksheet
-        _sheet_client_cache["last_failure"] = 0.0
         logging.getLogger(__name__).info(
             "_get_worksheet() FIRST-TIME setup took %.0fms (auth + open + worksheet lookup)",
             (time.time() - _t0) * 1000,
@@ -141,18 +129,10 @@ def _get_worksheet():
         # Connection/auth failed — degrade gracefully to local fallback
         # rather than crashing the whole app. Logged for debugging via
         # Streamlit Cloud's log viewer if this ever happens again.
-        #
-        # IMPORTANT: do NOT set "checked" = True here. A transient error
-        # (e.g. Google's [503] "service unavailable") would otherwise
-        # permanently lock this process out of Sheets for its entire
-        # lifetime — every save silently falls back to ephemeral local
-        # storage, which then vanishes on the next restart. Instead, we
-        # only remember *when* we failed, and retry after a short cooldown.
         logging.getLogger(__name__).error(
             "_get_worksheet() setup FAILED: %s: %s", type(e).__name__, e
         )
         _sheet_client_cache["worksheet"] = None
-        _sheet_client_cache["last_failure"] = time.time()
         return None
 
 

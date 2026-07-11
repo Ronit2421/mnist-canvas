@@ -20,15 +20,6 @@ Launch:
 
 from __future__ import annotations
 
-# Enabled FIRST, before any other import: if the process segfaults, this
-# makes Python print the actual Python-level stack trace (which file/line
-# was executing) to stderr instead of just the bare OS "Segmentation
-# fault" message with no location info. Temporary diagnostic aid — safe
-# to leave in permanently since it has near-zero overhead when nothing
-# crashes.
-import faulthandler
-faulthandler.enable()
-
 import io
 import os
 import logging
