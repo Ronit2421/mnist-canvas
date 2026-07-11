@@ -43,7 +43,7 @@ def _train_and_save() -> None:
     logger.info("Training a K-Neighbors Classifier for structural stroke validation...")
     pipe = Pipeline([
         ("scaler", StandardScaler()),
-        ("knn", KNeighborsClassifier(n_neighbors=5, weights="distance", n_jobs=-1)),
+        ("knn", KNeighborsClassifier(n_neighbors=5, weights="distance", n_jobs=1)),
     ])
     
     pipe.fit(X_train, y_train)
