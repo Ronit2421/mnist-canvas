@@ -197,11 +197,11 @@ class MNISTProcessor:
             return None
         self.step_cropped = cropped.copy()
 
-        # 6 – resize to 20 px (re-binarized inside)
+        # 6 – resize to 20 px (grayscale/anti-aliased, not re-binarized)
         resized = _resize_to_20(cropped)
         self.step_resized = resized.copy()
 
-        # 7 – place on 28×28 + CoM centering + final binarize
+        # 7 – place on 28×28 + CoM centering (grayscale edges kept)
         mnist_img = _center_on_28x28(resized)
 
         # 8 – contrast stretch so digit is always pure white
