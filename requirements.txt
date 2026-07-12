@@ -10,3 +10,5 @@ gspread>=6.0.0
 google-auth>=2.27.0
 tensorflow-cpu
 joblib>=1.3.0
+protobuf==5.26.1
+grpcio==1.62.2
