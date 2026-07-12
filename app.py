@@ -27,12 +27,43 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
+# Set the matplotlib backend ONCE, at import time. `_tab_dataset()` used to
+# call `matplotlib.use("Agg")` on every script rerun — and since st.tabs()
+# renders every tab's body on every rerun (not just the visible one), that
+# call was firing constantly, from every concurrent user session's thread.
+# Switching a matplotlib backend concurrently from multiple threads is not
+# thread-safe and is a plausible contributor to native crashes. Do it once,
+# here, before anything else touches matplotlib.
+import matplotlib
+matplotlib.use("Agg")
+
 st.set_page_config(
     page_title="MNIST Canvas",
     page_icon="✏️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Defensive threading limits — MUST be set before importing cv2/scipy/tensorflow.
+# Streamlit runs each user session in its own thread inside one process.
+# OpenCV, SciPy/OpenBLAS, and TensorFlow each try to spin up their own
+# internal native thread pools; several of them contending for CPU threads
+# in the same process is a well-documented cause of hard segfaults (not
+# Python exceptions — the whole process dies with no traceback). Pinning
+# everything to 1 thread trades a little raw speed for stability, which is
+# the right trade-off here since these operations are already fast (small
+# 28x28/280x280 images).
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
+# Workaround for the classic "OMP: Error #15: Initializing libiomp5.so, but
+# found libomp.so already initialized" crash that happens when TensorFlow
+# and OpenCV/SciPy each bundle their own OpenMP runtime. This silences the
+# duplicate-runtime check rather than truly fixing it, but it's the
+# standard mitigation used in practice.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 from mnist_processor import MNISTProcessor
 from classifier import DigitClassifier
@@ -70,67 +101,53 @@ def _get_classifier() -> DigitClassifier:
     return clf
 
 
-# ── Theme Palettes ──────────────────────────────────────────────────────────
-LIGHT_PALETTE = {
-    "_BG": "#FFFFFF",
-    "_SURFACE": "#F7F8FA",
-    "_CARD": "#FFFFFF",
-    "_ACCENT": "#6366F1",   # indigo
-    "_ACCENT2": "#EC4899",  # pink
-    "_TEXT": "#111827",
-    "_MUTED": "#6B7280",
-    "_BORDER": "#E5E7EB",
-    "_GREEN": "#10B981",
-}
-
-DARK_PALETTE = {
-    "_BG": "#111827",
-    "_SURFACE": "#0F172A",
-    "_CARD": "#1E293B",
-    "_ACCENT": "#6366F1",   # indigo
-    "_ACCENT2": "#EC4899",  # pink
-    "_TEXT": "#F9FAFB",
-    "_MUTED": "#9CA3AF",
-    "_BORDER": "#334155",
-    "_GREEN": "#10B981",
-}
+# ── modern light palette ─────────────────────────────────────────────────────
+_BG       = "#FFFFFF"
+_SURFACE  = "#F7F8FA"
+_CARD     = "#FFFFFF"
+_ACCENT   = "#6366F1"   # indigo
+_ACCENT2  = "#EC4899"   # pink
+_TEXT     = "#111827"
+_MUTED    = "#6B7280"
+_BORDER   = "#E5E7EB"
+_GREEN    = "#10B981"
 
 TOTAL_DIGITS = 10  # session covers 0..9
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CSS — Dynamic Theme styles
+# CSS — modern SaaS-style light theme
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _css(colors: dict) -> None:
+def _css() -> None:
     st.markdown(f"""
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@440;500;600;700;800&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
       html, body, [data-testid="stAppViewContainer"] {{
-          background-color: {colors['_SURFACE']};
-          color: {colors['_TEXT']};
+          background-color: {_SURFACE};
+          color: {_TEXT};
           font-family: 'Inter', sans-serif;
       }}
       [data-testid="stHeader"] {{ background: transparent; }}
       * {{ font-family: 'Inter', sans-serif; }}
 
       [data-testid="stSidebar"] {{
-          background-color: {colors['_CARD']};
-          border-right: 1px solid {colors['_BORDER']};
+          background-color: {_CARD};
+          border-right: 1px solid {_BORDER};
       }}
-      [data-testid="stSidebar"] * {{ color: {colors['_TEXT']}; }}
+      [data-testid="stSidebar"] * {{ color: {_TEXT}; }}
 
       h1, h2, h3 {{
           font-family: 'Inter', sans-serif;
           font-weight: 800;
           letter-spacing: -0.02em;
-          color: {colors['_TEXT']};
+          color: {_TEXT};
       }}
 
       .ui-card {{
-          background: {colors['_CARD']};
-          border: 1px solid {colors['_BORDER']};
+          background: {_CARD};
+          border: 1px solid {_BORDER};
           border-radius: 16px;
           padding: 1.4rem 1.5rem;
           box-shadow: 0 1px 3px rgba(17,24,39,0.04), 0 1px 2px rgba(17,24,39,0.03);
@@ -138,19 +155,19 @@ def _css(colors: dict) -> None:
       }}
 
       [data-testid="stMetric"] {{
-          background: {colors['_SURFACE']};
-          border: 1px solid {colors['_BORDER']};
+          background: {_SURFACE};
+          border: 1px solid {_BORDER};
           border-radius: 12px;
           padding: 14px 16px;
       }}
       [data-testid="stMetricValue"] {{
-          color: {colors['_TEXT']}; font-weight: 700; font-size: 1.15rem;
+          color: {_TEXT}; font-weight: 700; font-size: 1.15rem;
       }}
-      [data-testid="stMetricLabel"] {{ color: {colors['_MUTED']}; font-size: 0.78rem; }}
+      [data-testid="stMetricLabel"] {{ color: {_MUTED}; font-size: 0.78rem; }}
 
       .section-label {{
           font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
-          color: {colors['_MUTED']}; font-weight: 600; margin-bottom: 0.5rem;
+          color: {_MUTED}; font-weight: 600; margin-bottom: 0.5rem;
       }}
 
       .welcome-wrap {{
@@ -158,41 +175,41 @@ def _css(colors: dict) -> None:
           min-height: 70vh;
       }}
       .welcome-card {{
-          background: {colors['_CARD']}; border: 1px solid {colors['_BORDER']}; border-radius: 24px;
+          background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 24px;
           padding: 3rem 2.5rem; max-width: 440px; width: 100%;
           box-shadow: 0 20px 50px -12px rgba(99,102,241,0.18), 0 4px 12px rgba(17,24,39,0.04);
           text-align: center;
       }}
       .welcome-icon {{
           width: 56px; height: 56px; margin: 0 auto 1.2rem;
-          background: linear-gradient(135deg, {colors['_ACCENT']}, {colors['_ACCENT2']});
+          background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2});
           border-radius: 16px; display: flex; align-items: center;
           justify-content: center; font-size: 1.6rem;
       }}
-      .welcome-title {{ font-size: 1.7rem; font-weight: 800; color: {colors['_TEXT']}; margin-bottom: 0.3em; }}
-      .welcome-sub {{ font-size: 0.9rem; color: {colors['_MUTED']}; margin-bottom: 1.8rem; line-height: 1.5; }}
+      .welcome-title {{ font-size: 1.7rem; font-weight: 800; color: {_TEXT}; margin-bottom: 0.3em; }}
+      .welcome-sub {{ font-size: 0.9rem; color: {_MUTED}; margin-bottom: 1.8rem; line-height: 1.5; }}
 
       .saved-badge {{
-          background: {colors['_GREEN']}14; border: 1px solid {colors['_GREEN']}55;
+          background: {_GREEN}14; border: 1px solid {_GREEN}55;
           color: #047857; border-radius: 10px; padding: 0.55rem 1rem;
           font-size: 0.85rem; font-weight: 600;
           display: inline-flex; align-items: center; gap: 0.4rem;
       }}
 
       [data-testid="stDataFrame"] {{
-          background: {colors['_CARD']}; border: 1px solid {colors['_BORDER']}; border-radius: 12px;
+          background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 12px;
       }}
 
-      hr {{ border-color: {colors['_BORDER']}; margin: 1.2rem 0; }}
+      hr {{ border-color: {_BORDER}; margin: 1.2rem 0; }}
 
       [data-testid="stDownloadButton"] button, .stButton button {{
           border-radius: 10px; font-weight: 600; font-size: 0.86rem;
-          border: 1px solid {colors['_BORDER']}; transition: all .15s ease;
+          border: 1px solid {_BORDER}; transition: all .15s ease;
       }}
-      [data-testid="stDownloadButton"] button {{ background: {colors['_CARD']}; color: {colors['_TEXT']}; }}
-      [data-testid="stDownloadButton"] button:hover {{ border-color: {colors['_ACCENT']}; color: {colors['_ACCENT']}; }}
+      [data-testid="stDownloadButton"] button {{ background: {_CARD}; color: {_TEXT}; }}
+      [data-testid="stDownloadButton"] button:hover {{ border-color: {_ACCENT}; color: {_ACCENT}; }}
       button[kind="primary"] {{
-          background: linear-gradient(135deg, {colors['_ACCENT']}, {colors['_ACCENT2']}) !important;
+          background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2}) !important;
           border: none !important; color: white !important;
           box-shadow: 0 4px 14px rgba(99,102,241,0.3);
       }}
@@ -201,19 +218,11 @@ def _css(colors: dict) -> None:
       [data-baseweb="tab-list"] {{ gap: 4px; }}
       [data-baseweb="tab"] {{ border-radius: 10px 10px 0 0; font-weight: 600; }}
 
-      [data-testid="stSlider"] [role="slider"] {{ background-color: {colors['_ACCENT']} !important; }}
+      [data-testid="stSlider"] [role="slider"] {{ background-color: {_ACCENT} !important; }}
 
       .ui-card canvas {{
           border-radius: 12px;
-          box-shadow: 0 0 0 1px {colors['_BORDER']};
-      }}
-
-      /* ── Fix canvas wrapper background bleeding white ── */
-      .ui-card iframe, 
-      [data-testid="stCustomComponentV1"], 
-      .ui-card div[data-testid="stCustomComponentV1"] > div {{
-          background-color: transparent !important;
-          background: transparent !important;
+          box-shadow: 0 0 0 1px {_BORDER};
       }}
 
       /* ── giant target-digit display ── */
@@ -223,13 +232,13 @@ def _css(colors: dict) -> None:
       }}
       .target-digit-circle {{
           width: 84px; height: 84px; border-radius: 20px;
-          background: linear-gradient(135deg, {colors['_ACCENT']}, {colors['_ACCENT2']});
+          background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2});
           display: flex; align-items: center; justify-content: center;
           font-size: 2.6rem; font-weight: 800; color: white; flex-shrink: 0;
           box-shadow: 0 8px 20px rgba(99,102,241,0.35);
       }}
-      .target-digit-meta {{ font-size: 0.85rem; color: {colors['_MUTED']}; }}
-      .target-digit-meta b {{ color: {colors['_TEXT']}; }}
+      .target-digit-meta {{ font-size: 0.85rem; color: {_MUTED}; }}
+      .target-digit-meta b {{ color: {_TEXT}; }}
 
       /* ── progress dots ── */
       .progress-dots {{ display: flex; gap: 6px; margin-bottom: 1.2rem; flex-wrap: wrap; }}
@@ -237,13 +246,13 @@ def _css(colors: dict) -> None:
           width: 30px; height: 30px; border-radius: 8px;
           display: flex; align-items: center; justify-content: center;
           font-size: 0.78rem; font-weight: 700; font-family: monospace;
-          border: 1.5px solid {colors['_BORDER']}; color: {colors['_MUTED']}; background: {colors['_SURFACE']};
+          border: 1.5px solid {_BORDER}; color: {_MUTED}; background: {_SURFACE};
       }}
       .progress-dot.done {{
-          background: {colors['_GREEN']}1A; border-color: {colors['_GREEN']}77; color: #047857;
+          background: {_GREEN}1A; border-color: {_GREEN}77; color: #047857;
       }}
       .progress-dot.current {{
-          background: linear-gradient(135deg, {colors['_ACCENT']}, {colors['_ACCENT2']});
+          background: linear-gradient(135deg, {_ACCENT}, {_ACCENT2});
           border-color: transparent; color: white;
           box-shadow: 0 4px 10px rgba(99,102,241,0.4);
       }}
@@ -251,9 +260,34 @@ def _css(colors: dict) -> None:
       /* ── session-complete card ── */
       .complete-icon {{
           width: 64px; height: 64px; margin: 0 auto 1rem;
-          background: linear-gradient(135deg, {colors['_GREEN']}, #34D399);
+          background: linear-gradient(135deg, {_GREEN}, #34D399);
           border-radius: 18px; display: flex; align-items: center;
           justify-content: center; font-size: 2rem;
+      }}
+
+      /* ── live preview ── */
+      .live-preview-wrap {{
+          display: flex; align-items: center; gap: 1rem;
+      }}
+      .live-preview-badge {{
+          background: {_ACCENT}14; border: 1px solid {_ACCENT}55;
+          color: {_ACCENT}; border-radius: 10px; padding: 0.3rem 0.7rem;
+          font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+          text-transform: uppercase; display: inline-flex; align-items: center; gap: 0.35rem;
+      }}
+      .live-preview-badge .dot {{
+          width: 6px; height: 6px; border-radius: 50%; background: {_ACCENT};
+          box-shadow: 0 0 0 0 {_ACCENT}66;
+          animation: pulse 1.4s infinite;
+      }}
+      @keyframes pulse {{
+          0%   {{ box-shadow: 0 0 0 0 {_ACCENT}55; }}
+          70%  {{ box-shadow: 0 0 0 6px {_ACCENT}00; }}
+          100% {{ box-shadow: 0 0 0 0 {_ACCENT}00; }}
+      }}
+      .live-preview-img {{
+          border-radius: 10px; box-shadow: 0 0 0 1px {_BORDER};
+          image-rendering: pixelated;
       }}
     </style>
     """, unsafe_allow_html=True)
@@ -263,32 +297,22 @@ def _css(colors: dict) -> None:
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sidebar(user_name: str, colors: dict) -> dict:
+def _sidebar(user_name: str) -> dict:
     with st.sidebar:
         st.markdown(f"""
         <div style='text-align:center;padding:0.8rem 0 0.6rem'>
           <div style='width:44px;height:44px;margin:0 auto 0.6rem;
-                      background:linear-gradient(135deg,{colors['_ACCENT']},{colors['_ACCENT2']});
+                      background:linear-gradient(135deg,{_ACCENT},{_ACCENT2});
                       border-radius:12px;display:flex;align-items:center;
                       justify-content:center;font-size:1.3rem;'>✏️</div>
-          <span style='font-size:1.05rem;font-weight:800;color:{colors['_TEXT']};'>
+          <span style='font-size:1.05rem;font-weight:800;color:{_TEXT};'>
             MNIST Canvas
           </span><br>
-          <span style='font-size:0.72rem;color:{colors['_MUTED']};'>
+          <span style='font-size:0.72rem;color:{_MUTED};'>
             👤 {user_name}
           </span>
         </div>
         """, unsafe_allow_html=True)
-
-        theme_mode = st.selectbox(
-            "App Theme Mode", 
-            ["Light Mode", "Dark Mode"], 
-            index=0 if st.session_state.get("theme", "light") == "light" else 1
-        )
-        new_theme = "light" if theme_mode == "Light Mode" else "dark"
-        if new_theme != st.session_state.get("theme", "light"):
-            st.session_state["theme"] = new_theme
-            st.rerun()
 
         if st.button("← Change name / restart session", use_container_width=True):
             for k in ["user_name", "screen", "last_result", "session_index"]:
@@ -303,8 +327,9 @@ def _sidebar(user_name: str, colors: dict) -> dict:
 
         st.divider()
         st.markdown("**Preprocessing**")
-        show_steps  = st.toggle("Show pipeline steps", value=True)
-        show_matrix = st.toggle("Show pixel matrix",   value=True)
+        show_steps    = st.toggle("Show pipeline steps", value=True)
+        show_matrix   = st.toggle("Show pixel matrix",   value=True)
+        show_live_prev = st.toggle("Live centered preview while drawing", value=True)
 
         st.divider()
         summary = dataset_summary()
@@ -314,9 +339,9 @@ def _sidebar(user_name: str, colors: dict) -> dict:
                 bar = "▰" * min(cnt, 16)
                 st.markdown(
                     f"<span style='font-family:monospace;font-size:0.72rem;"
-                    f"color:{colors['_MUTED']}'>{d} </span>"
-                    f"<span style='color:{colors['_ACCENT']};font-size:0.72rem'>{bar}</span>"
-                    f"<span style='color:{colors['_MUTED']};font-size:0.72rem'> {cnt}</span>",
+                    f"color:{_MUTED}'>{d} </span>"
+                    f"<span style='color:{_ACCENT};font-size:0.72rem'>{bar}</span>"
+                    f"<span style='color:{_MUTED};font-size:0.72rem'> {cnt}</span>",
                     unsafe_allow_html=True,
                 )
 
@@ -326,6 +351,7 @@ def _sidebar(user_name: str, colors: dict) -> dict:
         "canvas_size":  canvas_size,
         "show_steps":   show_steps,
         "show_matrix":  show_matrix,
+        "show_live_preview": show_live_prev,
     }
 
 
@@ -333,7 +359,7 @@ def _sidebar(user_name: str, colors: dict) -> dict:
 # Screen 1 — Welcome / Name Gate
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _screen_welcome(colors: dict) -> None:
+def _screen_welcome() -> None:
     st.markdown(f"""
     <div class="welcome-wrap">
       <div class="welcome-card">
@@ -366,7 +392,7 @@ def _screen_welcome(colors: dict) -> None:
                 st.rerun()
 
         st.markdown(
-            f"<div style='text-align:center;color:{colors['_MUTED']};font-size:0.78rem;"
+            f"<div style='text-align:center;color:{_MUTED};font-size:0.78rem;"
             f"margin-top:1rem'>{total_samples()} drawings saved so far</div>",
             unsafe_allow_html=True,
         )
@@ -390,12 +416,12 @@ def _render_progress(session_index: int) -> None:
     st.markdown(dots_html, unsafe_allow_html=True)
 
 
-def _render_target_digit(session_index: int, colors: dict) -> None:
+def _render_target_digit(session_index: int) -> None:
     st.markdown(f"""
     <div class="target-digit-wrap">
       <div class="target-digit-circle">{session_index}</div>
       <div class="target-digit-meta">
-  Draw this digit · <b style='color:{colors['_TEXT']}'>{session_index} to 9</b> in your session
+  Draw this digit · <b>{session_index} to 9</b> in your session
 </div>
     </div>
     """, unsafe_allow_html=True)
@@ -405,14 +431,14 @@ def _render_target_digit(session_index: int, colors: dict) -> None:
 # Screen 3 — Session complete
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _screen_session_complete(user_name: str, colors: dict) -> None:
+def _screen_session_complete(user_name: str) -> None:
     st.markdown(f"""
     <div class="welcome-wrap">
       <div class="welcome-card">
         <div class="complete-icon">🎉</div>
         <div class="welcome-title">Session complete!</div>
         <div class="welcome-sub">
-          Thanks <b style='color:{colors['_ACCENT']}'>{user_name}</b> — you drew all 10
+          Thanks <b style='color:{_ACCENT}'>{user_name}</b> — you drew all 10
           digits (0–9) and every one was saved to the shared dataset.
         </div>
       </div>
@@ -428,6 +454,37 @@ def _screen_session_complete(user_name: str, colors: dict) -> None:
         if st.button("View collected dataset", use_container_width=True):
             st.session_state["screen"] = "dataset_only"
             st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live preview (shown WHILE drawing, before Save is clicked)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_live_preview(raw_image_data: np.ndarray) -> None:
+    """
+    Runs the same MNISTProcessor pipeline used for saving, but purely for
+    display — nothing is written to the dataset here. This lets the user
+    see, in real time as they draw, how their stroke will be cropped,
+    resized, and centered before they hit Save.
+    """
+    preview_proc = MNISTProcessor()
+    preview_img = preview_proc.process(raw_image_data)
+
+    st.markdown(
+        "<div class='live-preview-wrap'>"
+        "<span class='live-preview-badge'><span class='dot'></span> Live preview</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if preview_img is None:
+        st.caption("Keep drawing — no digit detected yet.")
+        return
+
+    big = Image.fromarray(preview_img).resize((168, 168), Image.NEAREST)
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    st.image(buf.getvalue(), caption="This is how it'll be centered (28×28) when saved")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -492,11 +549,11 @@ def _render_results(user_name: str, cfg: dict, result: dict) -> None:
 # Dataset tab/screen
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _tab_dataset(colors: dict) -> None:
+def _tab_dataset() -> None:
     import pandas as pd
 
     st.markdown(
-        f"<h3 style='color:{colors['_TEXT']};margin-bottom:0.2rem'>📊 Collected Dataset</h3>",
+        f"<h3 style='color:{_TEXT};margin-bottom:0.2rem'>📊 Collected Dataset</h3>",
         unsafe_allow_html=True,
     )
 
@@ -513,27 +570,25 @@ def _tab_dataset(colors: dict) -> None:
     m2.metric("Contributors", len(summary["contributors"]))
     st.markdown('</div>', unsafe_allow_html=True)
 
-    import matplotlib
-    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     st.markdown('<div class="ui-card">', unsafe_allow_html=True)
     fig, ax = plt.subplots(figsize=(7, 2.6))
-    fig.patch.set_facecolor(colors["_CARD"])
-    ax.set_facecolor(colors["_SURFACE"])
+    fig.patch.set_facecolor("#FFFFFF")
+    ax.set_facecolor("#F7F8FA")
 
     digits = list(range(10))
     counts = [summary["per_digit"].get(d, 0) for d in digits]
-    colors_list = [colors["_ACCENT"] if c == max(counts) else "#E0E3F5" for c in counts]
+    colors = [_ACCENT if c == max(counts) else "#E0E3F5" for c in counts]
 
-    ax.bar(digits, counts, color=colors_list, edgecolor=colors["_BORDER"], linewidth=0.6)
+    ax.bar(digits, counts, color=colors, edgecolor=_BORDER, linewidth=0.6)
     ax.set_xticks(digits)
-    ax.set_xticklabels([str(d) for d in digits], color=colors["_TEXT"], fontsize=9)
-    ax.set_ylabel("Count", color=colors["_MUTED"], fontsize=8)
-    ax.tick_params(axis="y", colors=colors["_MUTED"], labelsize=7)
-    ax.spines[:].set_color(colors["_BORDER"])
-    ax.grid(axis="y", color=colors["_BORDER"], linewidth=0.4, linestyle="--")
-    ax.set_title("Samples per digit", color=colors["_TEXT"], fontsize=9, pad=6)
+    ax.set_xticklabels([str(d) for d in digits], color=_TEXT, fontsize=9)
+    ax.set_ylabel("Count", color=_MUTED, fontsize=8)
+    ax.tick_params(axis="y", colors=_MUTED, labelsize=7)
+    ax.spines[:].set_color(_BORDER)
+    ax.grid(axis="y", color=_BORDER, linewidth=0.4, linestyle="--")
+    ax.set_title("Samples per digit", color=_TEXT, fontsize=9, pad=6)
     plt.tight_layout(pad=0.5)
     st.pyplot(fig)
     plt.close(fig)
@@ -580,11 +635,7 @@ def _tab_dataset(colors: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    if "theme" not in st.session_state:
-        st.session_state["theme"] = "light"
-
-    colors = LIGHT_PALETTE if st.session_state["theme"] == "light" else DARK_PALETTE
-    _css(colors)
+    _css()
 
     if "screen" not in st.session_state:
         st.session_state["screen"] = "welcome"
@@ -594,34 +645,34 @@ def main() -> None:
     screen = st.session_state.get("screen", "welcome")
 
     if screen == "welcome":
-        _screen_welcome(colors)
+        _screen_welcome()
         return
 
     user_name = st.session_state.get("user_name", "User")
-    cfg = _sidebar(user_name, colors)
+    cfg = _sidebar(user_name)
 
     if screen == "dataset_only":
         st.markdown(
-            f"<h1 style='font-size:1.6rem;margin-bottom:0;color:{colors['_TEXT']}'>✏️ MNIST Canvas</h1>",
+            f"<h1 style='font-size:1.6rem;margin-bottom:0'>✏️ MNIST Canvas</h1>",
             unsafe_allow_html=True,
         )
         if st.button("← Back to drawing"):
             st.session_state["screen"] = "canvas"
             st.rerun()
-        _tab_dataset(colors)
+        _tab_dataset()
         return
 
     session_index = st.session_state.get("session_index", 0)
 
     # ── session finished — show completion screen ──────────────────────────
     if session_index >= TOTAL_DIGITS:
-        _screen_session_complete(user_name, colors)
+        _screen_session_complete(user_name)
         return
 
     st.markdown(
-        f"<h1 style='font-size:1.6rem;margin-bottom:0;color:{colors['_TEXT']}'>✏️ MNIST Canvas</h1>"
-        f"<p style='color:{colors['_MUTED']};font-size:0.88rem;margin-top:0.2rem'>"
-        f"Hello <b style='color:{colors['_ACCENT']}'>{user_name}</b> · "
+        f"<h1 style='font-size:1.6rem;margin-bottom:0'>✏️ MNIST Canvas</h1>"
+        f"<p style='color:{_MUTED};font-size:0.88rem;margin-top:0.2rem'>"
+        f"Hello <b style='color:{_ACCENT}'>{user_name}</b> · "
         f"draw each digit when prompted — it's saved automatically, then "
         f"the next digit appears</p>",
         unsafe_allow_html=True,
@@ -636,7 +687,7 @@ def main() -> None:
 
         with left:
             st.markdown('<div class="ui-card">', unsafe_allow_html=True)
-            _render_target_digit(session_index, colors)
+            _render_target_digit(session_index)
 
             try:
                 from streamlit_drawable_canvas import st_canvas
@@ -654,6 +705,8 @@ def main() -> None:
                 drawing_mode="freedraw",
                 key=f"canvas_{session_index}",
                 display_toolbar=True,
+                update_streamlit=True,   # push image_data to Python after every stroke,
+                                         # so the live preview can react without Save
             )
 
             c1, c2 = st.columns(2)
@@ -667,6 +720,17 @@ def main() -> None:
             if clear_btn:
                 st.session_state.pop("last_result", None)
                 st.rerun()
+
+            # ── live centered preview, right under the canvas ───────────────
+            is_drawing = (
+                canvas_result is not None
+                and canvas_result.image_data is not None
+                and canvas_result.image_data.max() > 0
+            )
+            if cfg["show_live_preview"] and is_drawing and not process_btn:
+                st.markdown('<div class="ui-card">', unsafe_allow_html=True)
+                _render_live_preview(canvas_result.image_data)
+                st.markdown('</div>', unsafe_allow_html=True)
 
         with right:
             if process_btn:
@@ -725,7 +789,7 @@ def main() -> None:
                 _render_results(user_name, cfg, st.session_state["last_result"])
 
     with tab_dataset:
-        _tab_dataset(colors)
+        _tab_dataset()
 
 
 if __name__ == "__main__":

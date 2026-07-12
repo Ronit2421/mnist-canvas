@@ -29,20 +29,34 @@ import numpy as np
 from scipy import ndimage
 from PIL import Image
 
+# OpenCV spins up its own internal thread pool (TBB/OpenMP) for functions
+# like cvtColor/bilateralFilter/resize. Streamlit runs every user session
+# in its own Python thread inside ONE process, and concurrent sessions
+# calling into OpenCV's thread pool at the same time is a well-known cause
+# of hard segfaults (not a Python exception — the whole process dies).
+# Disabling OpenCV's internal threading is the standard fix for this class
+# of crash in threaded server apps (Flask/Django/Streamlit/etc).
+cv2.setNumThreads(1)
+
 
 # ─────────────────────────── helpers ────────────────────────────────────────
 
 def _to_grayscale(rgba: np.ndarray) -> np.ndarray:
     """RGBA canvas → 8-bit grayscale, using alpha as stroke mask."""
     if rgba.ndim == 2:
-        return rgba.astype(np.uint8)
+        return np.ascontiguousarray(rgba, dtype=np.uint8)
     if rgba.shape[2] == 4:
         alpha = rgba[:, :, 3].astype(np.float32) / 255.0
-        # Convert RGB to grayscale then multiply by alpha
-        rgb_gray = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2GRAY).astype(np.float32)
+        # rgba[:, :, :3] is a NON-CONTIGUOUS view (it drops the 4th channel
+        # out of an interleaved RGBA buffer). OpenCV's C++ core assumes
+        # contiguous memory; feeding it a strided view like this is a known
+        # way to get silent memory corruption or a segfault instead of a
+        # clean Python error. Always force a contiguous copy before cv2 calls.
+        rgb = np.ascontiguousarray(rgba[:, :, :3])
+        rgb_gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
         result   = (rgb_gray * alpha).astype(np.uint8)
-        return result
-    return cv2.cvtColor(rgba, cv2.COLOR_RGB2GRAY)
+        return np.ascontiguousarray(result)
+    return cv2.cvtColor(np.ascontiguousarray(rgba), cv2.COLOR_RGB2GRAY)
 
 
 def _denoise(gray: np.ndarray) -> np.ndarray:
@@ -83,7 +97,11 @@ def _crop_digit(binary: np.ndarray, padding: int = 4) -> np.ndarray | None:
     y1 = max(y - padding, 0)
     x2 = min(x + w + padding, W)
     y2 = min(y + h + padding, H)
-    return binary[y1:y2, x1:x2]
+    # Slicing both axes of a 2D array produces a NON-CONTIGUOUS view (rows
+    # are individually contiguous but not laid out back-to-back in memory).
+    # This gets passed straight into cv2.resize() next, so force a
+    # contiguous copy here rather than risk another OpenCV crash.
+    return np.ascontiguousarray(binary[y1:y2, x1:x2])
 
 
 def _resize_to_20(cropped: np.ndarray) -> np.ndarray:

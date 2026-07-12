@@ -11,12 +11,31 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Defensive: if this module ever gets imported before app.py sets these
+# (e.g. run standalone, or import order changes), set them here too so
+# TensorFlow doesn't spin up its own multi-threaded pool inside a process
+# that Streamlit is already running multi-threaded.
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 # Save the trained deep learning weights as a standard Keras model file
 _MODEL_PATH = os.path.join(os.path.dirname(__file__), "mnist_model.keras")
+
+# `DigitClassifier` is wrapped in @st.cache_resource in app.py, which means
+# ONE shared instance (and one shared TF model) serves every concurrent
+# Streamlit session — and each session runs in its own thread inside the
+# same process. Calling model.predict()/model() concurrently on the same
+# Keras model from multiple threads with no synchronization is a
+# well-documented cause of native (segfault) crashes in TensorFlow — the
+# C++ runtime underneath doesn't guarantee that's safe. This lock forces
+# predictions (and the one-time load/train) to happen one at a time.
+_MODEL_LOCK = threading.Lock()
 
 
 def _train_and_save() -> None:
@@ -71,10 +90,15 @@ class DigitClassifier:
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
-        import tensorflow as tf
-        if not os.path.exists(_MODEL_PATH):
-            _train_and_save()
-        self._model = tf.keras.models.load_model(_MODEL_PATH)
+        with _MODEL_LOCK:
+            # Re-check inside the lock — another thread may have already
+            # loaded it while we were waiting.
+            if self._model is not None:
+                return
+            import tensorflow as tf
+            if not os.path.exists(_MODEL_PATH):
+                _train_and_save()
+            self._model = tf.keras.models.load_model(_MODEL_PATH)
 
     def is_ready(self) -> bool:
         return os.path.exists(_MODEL_PATH)
@@ -87,16 +111,25 @@ class DigitClassifier:
             confidence      : float (0–1)
         """
         self._ensure_loaded()
-        
+
         # 1. Normalize the image array to the 0-1 range exactly like the training setup
         x = mnist_image.astype(np.float32) / 255.0
-        
+
         # 2. Reshape to match the expected batch input shape: (1, 28, 28)
         x = np.expand_dims(x, axis=0)
-        
-        # 3. Run inference
-        predictions = self._model.predict(x, verbose=0)
+
+        # 3. Run inference. Serialized via the lock since this model is
+        # shared (via st.cache_resource) across every concurrent Streamlit
+        # session/thread — concurrent unsynchronized calls into the same
+        # TF model are a known crash risk. `model(x, training=False)` is
+        # also used instead of `model.predict(x)`: for single-sample
+        # inference it skips the extra tf.data/callback machinery that
+        # `.predict()` sets up on every call, which is both faster and has
+        # less surface area for issues under repeated rapid calls.
+        with _MODEL_LOCK:
+            predictions = self._model(x, training=False).numpy()
+
         digit = int(np.argmax(predictions[0]))
         confidence = float(predictions[0][digit])
-        
+
         return digit, confidence
