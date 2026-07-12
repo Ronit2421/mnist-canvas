@@ -1,9 +1,10 @@
 """
 classifier.py
 ─────────────
-Upgraded MNIST digit classifier using real 28×28 shapes from OpenML 
-via a K-Neighbors Classifier. Trains efficiently on first launch,
-then caches locally to ensure lightning-fast execution.
+Upgraded MNIST digit classifier using a Feed-Forward Neural Network 
+(Multilayer Perceptron) built with TensorFlow/Keras. Trains efficiently 
+on first launch with normalized data, then caches locally to ensure 
+lightning-fast execution and zero memory overhead.
 """
 
 from __future__ import annotations
@@ -14,61 +15,66 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_MODEL_PATH = os.path.join(os.path.dirname(__file__), "mnist_clf.joblib")
+# Save the trained deep learning weights as a standard Keras model file
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "mnist_model.keras")
 
 
 def _train_and_save() -> None:
-    import joblib
-    from sklearn.datasets import fetch_openml
-    from sklearn.neighbors import KNeighborsClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.pipeline import Pipeline
+    import tensorflow as tf
 
-    logger.info("Fetching authentic 28×28 MNIST data from OpenML (one-time download)...")
+    logger.info("Loading authentic 28×28 MNIST data from Keras datasets...")
+    mnist_dataset = tf.keras.datasets.mnist
+    (x_train, y_train), (x_test, y_test) = mnist_dataset.load_data()
     
-    # Fetch a subset of the real MNIST dataset to keep compilation fast
-    X, y = fetch_openml("mnist_784", version=1, return_X_y=True, as_frame=False, parser="auto")
-    y = y.astype(np.int32)
-    
-    # Use 40,000 samples — more coverage of digit-shape variation than the
-    # previous 15,000, while still training/caching in a reasonable time.
-    X_sub, _, y_sub, _ = train_test_split(
-        X, y, train_size=40000, stratify=y, random_state=42
-    )
+    logger.info("Applying feature scaling (normalization) to pixel data...")
+    # Scale pixel values from [0, 255] down to [0.0, 1.0] as verified in the notebook
+    x_train_normalized = x_train / 255.0
+    x_test_normalized = x_test / 255.0
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_sub, y_sub, test_size=0.15, random_state=42, stratify=y_sub
-    )
-
-    logger.info("Training a K-Neighbors Classifier for structural stroke validation...")
-    # No StandardScaler: MNIST pixels are already on one consistent 0-255
-    # scale, and per-pixel scaling blows up the (near-zero-variance) corner
-    # pixels, adding noise to the distance metric instead of removing it.
-    pipe = Pipeline([
-        ("knn", KNeighborsClassifier(n_neighbors=9, weights="distance", n_jobs=-1)),
+    logger.info("Building the Feed-Forward Neural Network architecture...")
+    # Matches the model from the notebook exactly: Input Flatten -> 2x Dense 128 -> Dropout -> Softmax Output
+    model = tf.keras.models.Sequential([
+        tf.keras.layers.Flatten(input_shape=(28, 28)),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(10, activation='softmax')
     ])
     
-    pipe.fit(X_train, y_train)
-    acc = pipe.score(X_test, y_test)
-    logger.info("Real-MNIST KNN Classifier validation accuracy: %.4f", acc)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss=tf.keras.losses.sparse_categorical_crossentropy,
+        metrics=['accuracy']
+    )
     
-    joblib.dump(pipe, _MODEL_PATH)
+    logger.info("Training the network model for 15 epochs...")
+    # verbose=0 keeps terminal clutter minimal during the server process
+    model.fit(
+        x_train_normalized, 
+        y_train, 
+        epochs=15, 
+        validation_data=(x_test_normalized, y_test), 
+        verbose=0
+    )
+    
+    # Save the architecture + trained weights to a compact file
+    model.save(_MODEL_PATH)
     logger.info("Classifier saved successfully → %s", _MODEL_PATH)
 
 
 class DigitClassifier:
-    """Thin wrapper around the trained sklearn pipeline."""
+    """Thin wrapper around the trained TensorFlow/Keras model pipeline."""
 
     def __init__(self) -> None:
-        self._pipe = None
+        self._model = None
 
     def _ensure_loaded(self) -> None:
-        if self._pipe is not None:
+        if self._model is not None:
             return
-        import joblib
+        import tensorflow as tf
         if not os.path.exists(_MODEL_PATH):
             _train_and_save()
-        self._pipe = joblib.load(_MODEL_PATH)
+        self._model = tf.keras.models.load_model(_MODEL_PATH)
 
     def is_ready(self) -> bool:
         return os.path.exists(_MODEL_PATH)
@@ -81,13 +87,16 @@ class DigitClassifier:
             confidence      : float (0–1)
         """
         self._ensure_loaded()
-        x = mnist_image.astype(np.float32).flatten().reshape(1, -1)
         
-        # Predict digit label
-        digit = int(self._pipe.predict(x)[0])
+        # 1. Normalize the image array to the 0-1 range exactly like the training setup
+        x = mnist_image.astype(np.float32) / 255.0
         
-        # Calculate neighbor distance ratios to output a proxy confidence score
-        probs = self._pipe.predict_proba(x)[0]
-        confidence = float(probs[digit])
+        # 2. Reshape to match the expected batch input shape: (1, 28, 28)
+        x = np.expand_dims(x, axis=0)
+        
+        # 3. Run inference
+        predictions = self._model.predict(x, verbose=0)
+        digit = int(np.argmax(predictions[0]))
+        confidence = float(predictions[0][digit])
         
         return digit, confidence
